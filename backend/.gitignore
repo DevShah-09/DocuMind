@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.pdb
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Environment Variables (contains API keys!)
+.env
+.env.*
+
+# Local uploaded files (can be large & contain user data)
+local_storage/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Pytest / testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# MyPy
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.sw?
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug / temp scripts
+test_*.py
