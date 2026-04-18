@@ -9,32 +9,40 @@ class VisionProcessor:
             api_key=settings.OPENROUTER_API_KEY,
         )
 
-    async def analyze_document(self, file_content: bytes):
-        base64_image = base64.b64encode(file_content).decode('utf-8')
-        
-        # New prompt: "Describe this document in one or two words as a category"
+    async def analyze_document(self, images_base64: list[str]):
         prompt = """
-        Analyze this document image. 
-        1. Give it a short, one-to-two word category name (e.g., 'Electricity Bill', 'College ID', 'Passport', 'Medical Report').
-        2. Extract the main text content.
-        Return as JSON: {"category": "...", "text": "..."}
+        Analyze this document image(s). 
+        Determine Document Category. Choose exactly one from: [electricity_bill, water_bill, gas_bill, mobile_bill, bank_statement, invoice, receipt, marksheet, certificate, aadhaar, pan_card, passport, insurance, medical_report, prescription, legal_document, tax_document, resume, miscellaneous].
+        Confidence Score: Evaluate confidence from 0 to 100.
+        Metadata: Dynamically extract structured relevant fields depending on the category.
+        Summary: Generate a searchable summary of the document.
+        Text: Extract the main text content.
+        Return your response strictly as JSON with exactly these keys: 'category' (string), 'confidence' (integer), 'metadata' (dictionary), 'summary' (string), 'text' (string).
         """
+        
+        content_array = [{"type": "text", "text": prompt}]
+        for b64_img in images_base64:
+            content_array.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}})
         
         try:
             response = self.client.chat.completions.create(
                 model="qwen/qwen2.5-vl-72b-instruct",
                 messages=[{
                     "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
+                    "content": content_array
                 }],
                 response_format={ "type": "json_object" },
-                max_tokens=2000, # Added to prevent OpenRouter from assuming 65k tokens and rejecting the request
+                max_tokens=2000,
             )
             return response.choices[0].message.content
         except Exception as e:
             print(f"Vision API Error: {e}")
-            # Fallback JSON so the categorization gracefully defaults to "Unsorted" instead of completely failing the upload
-            return '{"category": "Unsorted", "text": "Failed to extract text during processing."}'
+            fallback_json = {
+                "category": "miscellaneous", 
+                "confidence": 0, 
+                "metadata": {}, 
+                "summary": "Failed to extract text during processing.", 
+                "text": ""
+            }
+            import json
+            return json.dumps(fallback_json)

@@ -21,8 +21,15 @@ class VectorDBService:
 
     async def index_document(self, doc_id, text: str, metadata: dict):
         """Generates embeddings and stores them in Qdrant."""
+        if not text:
+            text = metadata.get("original_name", "")
+            
         print(f"[QDRANT] Encoding text of length {len(text)}...")
         vector = self.encoder.encode(text).tolist()
+        
+        # Merge text into metadata payload
+        payload = {**metadata, "text_content": text}
+        
         print(f"[QDRANT] Upserting point id={doc_id} into collection '{self.collection_name}'...")
         self.client.upsert(
             collection_name=self.collection_name,
@@ -30,7 +37,7 @@ class VectorDBService:
                 models.PointStruct(
                     id=doc_id,
                     vector=vector,
-                    payload={**metadata, "text_content": text}
+                    payload=payload
                 )
             ]
         )

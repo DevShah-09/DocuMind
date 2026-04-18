@@ -1,109 +1,54 @@
-import uuid
-import json
-import os
 import traceback
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from app.services.vision_model import VisionProcessor
-from app.services.vector_db import VectorDBService
+from app.services.processor import DocumentOrchestrator
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
-# Initialize services
-vision_processor = VisionProcessor()
-vector_db = VectorDBService()
+# Initialize Orchestrator which ties everything together
+orchestrator = DocumentOrchestrator()
 
-# Local storage configuration
-UPLOAD_DIR = "./local_storage"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+# Allowed formats and max size
+ALLOWED_EXTENSIONS = {"pdf", "jpg", "jpeg", "png"}
+MAX_FILE_SIZE_MB = 20
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 @router.post("/upload")
 async def upload_and_process(file: UploadFile = File(...)):
     """
-    Local Pipeline: Frontend -> Local Disk -> Qwen2.5-VL -> Qdrant
+    Cloud Pipeline: Frontend -> FastAPI -> PyMuPDF -> Qwen2.5-VL -> Cloudflare R2 + Qdrant
     """
     try:
-        # Generate unique ID and local path
-        doc_id = uuid.uuid4()  # Keep as UUID object, not string — Qdrant requires UUID or int
-        doc_id_str = str(doc_id)
-        file_extension = file.filename.split(".")[-1]
-        unique_filename = f"{doc_id_str}.{file_extension}"
-        file_path = os.path.join(UPLOAD_DIR, unique_filename)
-        print(f"[UPLOAD] Starting upload for: {file.filename} -> {unique_filename}")
+        # File Validation
+        file_extension = file.filename.split(".")[-1].lower()
+        if file_extension not in ALLOWED_EXTENSIONS:
+            raise HTTPException(status_code=400, detail=f"File extension '{file_extension}' not allowed. Must be one of {ALLOWED_EXTENSIONS}")
 
-        # 1. Save file to local storage
         content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
-        print(f"[UPLOAD] File saved to disk: {file_path}")
+        if len(content) > MAX_FILE_SIZE_BYTES:
+            raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB.")
+        elif len(content) == 0:
+            raise HTTPException(status_code=400, detail="Empty file uploaded.")
 
-        # 2. Dynamic Categorization using Qwen2.5-VL
-        raw_analysis = await vision_processor.analyze_document(content)
-        print(f"[UPLOAD] Raw vision model response: {raw_analysis}")
-        
-        # Strip potential markdown formatting before parsing JSON
-        if raw_analysis.startswith("```json"):
-            raw_analysis = raw_analysis.replace("```json", "", 1).replace("```", "").strip()
-        elif raw_analysis.startswith("```"):
-            raw_analysis = raw_analysis.replace("```", "", 1).replace("```", "").strip()
-            
-        try:
-            analysis_data = json.loads(raw_analysis)
-        except json.JSONDecodeError:
-            print(f"[UPLOAD] Failed to parse model JSON output: {raw_analysis}")
-            analysis_data = {}
-        
-        category = analysis_data.get("category", "Unsorted")
-        extracted_text = analysis_data.get("text") or file.filename  # Fallback to filename so vector is never empty
-        print(f"[UPLOAD] Category: '{category}' | Text length: {len(extracted_text)}")
+        print(f"[API] Processing upload for: {file.filename}")
 
-        # 3. Index in Qdrant with local metadata
-        payload = {
-            "original_name": file.filename,
-            "local_filename": unique_filename,
-            "category": category,
-            "text_content": extracted_text,
-            "content_type": file.content_type
-        }
-        
-        print(f"[UPLOAD] Sending to Qdrant with id={doc_id_str}...")
-        await vector_db.index_document(doc_id, extracted_text, payload)
-        print(f"[UPLOAD] Successfully indexed in Qdrant!")
+        # Run the full categorization and storage pipeline via Orchestrator
+        result = await orchestrator.process_and_store(
+            file_content=content,
+            original_name=file.filename,
+            content_type=file.content_type,
+            user_id="test_user_123" # Hardcoded for MVP, should come from Auth
+        )
 
+        print(f"[API] Successfully processed {file.filename}.")
+        
         return {
-            "id": doc_id_str,
-            "filename": file.filename,
-            "category": category,
-            "status": "Successfully indexed locally"
+            "message": "Upload successful",
+            "data": result
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"[UPLOAD] ERROR: {e}")
+        print(f"[API] ERROR: {e}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-
-
-
-
-
-#with cloudfare R2
-# from fastapi import APIRouter, UploadFile, File
-# from app.services.processor import DocumentOrchestrator
-
-# router = APIRouter()
-# orchestrator = DocumentOrchestrator()
-
-# @router.post("/process-document")
-# async def handle_upload(file: UploadFile = File(...)):
-#     content = await file.read()
-    
-#     # Run the categorization and storage pipeline
-#     result = await orchestrator.process_and_store(
-#         file_content=content,
-#         original_name=file.filename,
-#         content_type=file.content_type
-#     )
-    
-#     return {
-#         "message": "Upload successful",
-#         "data": result
-#     }
+        raise HTTPException(status_code=500, detail=f"Upload processing failed: {str(e)}")

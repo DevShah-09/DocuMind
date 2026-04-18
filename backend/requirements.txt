@@ -6,3 +6,4 @@ qdrant-client
 sentence-transformers
 openai
 pydantic-settings
+pymupdf
