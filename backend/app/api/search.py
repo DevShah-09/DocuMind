@@ -26,7 +26,7 @@ async def get_dynamic_collections():
             cat_name = payload.get("category", "Unsorted")
             
             # Construct a local URL pointing to your FastAPI static mount
-            file_url = f"http://localhost:8000/static/{payload['local_filename']}"
+            file_url = f"http://localhost:8000/static/{payload.get('bucket_path', '')}"
             
             category_map[cat_name].append({
                 "id": point.id,
@@ -58,7 +58,7 @@ async def semantic_search(q: str):
     return [{
         "name": res.payload["original_name"],
         "category": res.payload["category"],
-        "url": f"http://localhost:8000/static/{res.payload['local_filename']}",
+        "url": f"http://localhost:8000/static/{res.payload.get('bucket_path', '')}",
         "score": res.score
     } for res in results]
 
