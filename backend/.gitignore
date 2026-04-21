@@ -17,6 +17,7 @@ env/
 
 # Local uploaded files (can be large & contain user data)
 local_storage/
+qdrant_storage/
 
 # Distribution / packaging
 dist/
