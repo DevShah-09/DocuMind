@@ -31,7 +31,8 @@ async def get_dynamic_collections():
             category_map[cat_name].append({
                 "id": point.id,
                 "name": payload.get("original_name"),
-                "url": file_url
+                "url": file_url,
+                "file_key": payload.get("bucket_path")
             })
 
         # 2. Format as a list for the frontend .map() function

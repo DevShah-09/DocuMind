@@ -16,4 +16,14 @@ class LocalStorageService:
 
     def get_local_url(self, file_name: str):
         """Returns a local static URL for the frontend to display the file."""
-        return f"http://localhost:8000/static/{file_name}"
+        return f"http://localhost:8000/static/{file_name}"
+
+    def delete_file(self, file_name: str):
+        """Deletes the file from local disk."""
+        file_path = os.path.join(self.upload_dir, file_name)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            print(f"[STORAGE] Deleted file: {file_name}")
+            return True
+        return False
+

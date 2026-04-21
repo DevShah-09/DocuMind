@@ -62,3 +62,42 @@ class VectorDBService:
             query_vector=query_vector,
             limit=limit,
         )
+
+    async def check_duplicate(self, file_hash: str):
+        """Checks if a document with the same file_hash already exists."""
+        points, _ = self.client.scroll(
+            collection_name=self.collection_name,
+            scroll_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="file_hash",
+                        match=models.MatchValue(value=file_hash)
+                    )
+                ]
+            ),
+            limit=1,
+            with_payload=True
+        )
+        return points[0] if points else None
+
+    def get_document(self, doc_id: str):
+        """Retrieves a single document by its point ID."""
+        try:
+            results = self.client.retrieve(
+                collection_name=self.collection_name,
+                ids=[doc_id],
+                with_payload=True
+            )
+            return results[0] if results else None
+        except Exception:
+            return None
+
+    def delete_document(self, doc_id: str):
+        """Deletes a document from Qdrant by ID."""
+        self.client.delete(
+            collection_name=self.collection_name,
+            points_selector=models.PointIdsList(
+                points=[doc_id],
+            ),
+        )
+        print(f"[QDRANT] Deleted doc_id={doc_id}")

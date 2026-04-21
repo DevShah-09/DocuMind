@@ -17,6 +17,13 @@ class DocumentOrchestrator:
     async def process_and_store(self, file_content: bytes, original_name: str, content_type: str, user_id: str = "test_user_123"):
         # Metadata Generation
         file_hash = hashlib.sha256(file_content).hexdigest()
+        
+        # Check for duplicates before processing
+        existing_doc = await self.vector_db.check_duplicate(file_hash)
+        if existing_doc:
+            print(f"[PROCESSOR] Duplicate detected: {original_name} already exists.")
+            raise ValueError("This file already exists in your collections.")
+
         doc_id = str(uuid.uuid4())
         upload_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -59,6 +66,12 @@ class DocumentOrchestrator:
         except Exception as e:
             print(f"JSON Parse Error: {e} -> Raw string: {analysis_json_str}")
             analysis = {}
+
+        # Quality check: Reject if image is blurry or illegible
+        if analysis.get("is_blur"):
+            reason = analysis.get("blur_reason", "The photo is too blurry or low quality.")
+            print(f"[PROCESSOR] Quality check failed: {reason}")
+            raise ValueError(f"Image Quality Issue: {reason} Please re-upload a clearer version.")
 
         category = analysis.get("category", "miscellaneous")
         confidence = analysis.get("confidence", 0)

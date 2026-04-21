@@ -12,12 +12,19 @@ class VisionProcessor:
     async def analyze_document(self, images_base64: list[str]):
         prompt = """
         Analyze this document image(s). 
+        
+        Step 1: Quality Check. Determine if the image is too blurry, dark, or low quality to reliably extract text or identify the document. 
+        If it is illegible, set 'is_blur' to true and provide a short explanation in 'blur_reason'.
+        
+        Step 2: Classification (if not blurry). 
         Determine Document Category. Choose exactly one from: [electricity_bill, water_bill, gas_bill, mobile_bill, bank_statement, invoice, receipt, marksheet, certificate, aadhaar, pan_card, passport, insurance, medical_report, prescription, legal_document, tax_document, resume, miscellaneous].
         Confidence Score: Evaluate confidence from 0 to 100.
         Metadata: Dynamically extract structured relevant fields depending on the category.
         Summary: Generate a searchable summary of the document.
         Text: Extract the main text content.
-        Return your response strictly as JSON with exactly these keys: 'category' (string), 'confidence' (integer), 'metadata' (dictionary), 'summary' (string), 'text' (string).
+        
+        Return your response strictly as JSON with exactly these keys: 
+        'is_blur' (boolean), 'blur_reason' (string or null), 'category' (string), 'confidence' (integer), 'metadata' (dictionary), 'summary' (string), 'text' (string).
         """
         
         content_array = [{"type": "text", "text": prompt}]

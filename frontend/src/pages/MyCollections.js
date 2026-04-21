@@ -18,10 +18,23 @@ import {
 } from '@/components/ui/dialog';
 import { ExternalLink } from 'lucide-react';
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { toast } from 'sonner';
+
 const MyCollections = () => {
   const [collections, setCollections] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedCollection, setSelectedCollection] = useState(null);
+  const [docToDelete, setDocToDelete] = useState(null);
 
   // Map of available colors for dynamic categories
   const colorOptions = ['blue', 'green', 'purple', 'orange', 'pink', 'cyan'];
@@ -35,32 +48,61 @@ const MyCollections = () => {
     cyan: 'bg-cyan-100 dark:bg-cyan-900/20 text-cyan-600 dark:text-cyan-400',
   };
 
+  const fetchCollections = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/collections/summary');
+      const data = await response.json();
+      
+      const formattedData = data.map((item, index) => ({
+        id: index,
+        name: item.category_name,
+        documents: item.count,
+        docs: item.documents || [],
+        // Cycle through colorOptions based on index
+        color: colorOptions[index % colorOptions.length],
+      }));
+
+      setCollections(formattedData);
+    } catch (error) {
+      console.error("Failed to fetch collections:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const fetchCollections = async () => {
-      try {
-        const response = await fetch('http://localhost:8000/collections/summary');
-        const data = await response.json();
-        
-        // Data format from backend: [{ category_name: "Bill", count: 5, documents: [...] }]
-        const formattedData = data.map((item, index) => ({
-          id: index,
-          name: item.category_name,
-          documents: item.count,
-          docs: item.documents || [],
-          // Cycle through colorOptions based on index
-          color: colorOptions[index % colorOptions.length],
-        }));
-
-        setCollections(formattedData);
-      } catch (error) {
-        console.error("Failed to fetch collections:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchCollections();
   }, []);
+
+  const handleDeleteDocument = async () => {
+    if (!docToDelete) return;
+
+    try {
+      const response = await fetch(`http://localhost:8000/documents/${docToDelete.id}`, {
+        method: 'DELETE',
+      });
+
+      if (response.ok) {
+        toast.success('Document deleted successfully');
+        fetchCollections();
+        // Update selectedCollection locally to avoid close-reopen
+        if (selectedCollection) {
+          setSelectedCollection(prev => ({
+            ...prev,
+            docs: prev.docs.filter(d => d.id !== docToDelete.id),
+            documents: prev.documents - 1
+          }));
+        }
+      } else {
+        toast.error('Failed to delete document');
+      }
+    } catch (error) {
+      console.error('Delete error:', error);
+      toast.error('An error occurred while deleting');
+    } finally {
+      setDocToDelete(null);
+    }
+  };
 
   if (loading) {
     return (
@@ -177,21 +219,55 @@ const MyCollections = () => {
                         </p>
                       </div>
                     </div>
-                    <Button 
-                      variant="outline" 
-                      size="sm"
-                      className="opacity-0 group-hover:opacity-100 transition-opacity"
-                      onClick={() => window.open(doc.url, '_blank')}
-                    >
-                      <ExternalLink className="w-4 h-4 mr-2" />
-                      Open PDF
-                    </Button>
+                    <div className="flex items-center gap-2">
+                      <Button 
+                        variant="outline" 
+                        size="sm"
+                        className="opacity-0 group-hover:opacity-100 transition-opacity"
+                        onClick={() => window.open(doc.url, '_blank')}
+                      >
+                        <ExternalLink className="w-4 h-4 mr-2" />
+                        Open PDF
+                      </Button>
+                      <Button 
+                        variant="ghost" 
+                        size="sm"
+                        className="opacity-0 group-hover:opacity-100 transition-opacity text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDocToDelete(doc);
+                        }}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </div>
                   </div>
                 ))}
               </div>
             </div>
           </DialogContent>
         </Dialog>
+
+        {/* Delete Confirmation Dialog */}
+        <AlertDialog open={!!docToDelete} onOpenChange={(open) => !open && setDocToDelete(null)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This will permanently delete <span className="font-semibold text-slate-900 dark:text-white">"{docToDelete?.name}"</span> from your storage and indexed data. This action cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction 
+                onClick={handleDeleteDocument}
+                className="bg-red-600 hover:bg-red-700 text-white"
+              >
+                Delete
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </motion.div>
     </div>
   );

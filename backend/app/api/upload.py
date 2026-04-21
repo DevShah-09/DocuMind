@@ -51,4 +51,32 @@ async def upload_and_process(file: UploadFile = File(...)):
     except Exception as e:
         print(f"[API] ERROR: {e}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Upload processing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Upload processing failed: {str(e)}")
+
+@router.delete("/{doc_id}")
+async def delete_document(doc_id: str):
+    """
+    Deletes document from storage and vector database.
+    """
+    try:
+        # 1. Get document metadata from Qdrant
+        doc = orchestrator.vector_db.get_document(doc_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # 2. Delete physical file from storage
+        file_key = doc.payload.get("bucket_path")
+        if file_key:
+            orchestrator.storage.delete_file(file_key)
+            
+        # 3. Delete point from Qdrant
+        orchestrator.vector_db.delete_document(doc_id)
+        
+        return {"message": "Document deleted successfully", "doc_id": doc_id}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[API] DELETE ERROR: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete document: {str(e)}")
+
