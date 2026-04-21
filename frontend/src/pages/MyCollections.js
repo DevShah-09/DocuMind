@@ -10,10 +10,18 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { ExternalLink } from 'lucide-react';
 
 const MyCollections = () => {
   const [collections, setCollections] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [selectedCollection, setSelectedCollection] = useState(null);
 
   // Map of available colors for dynamic categories
   const colorOptions = ['blue', 'green', 'purple', 'orange', 'pink', 'cyan'];
@@ -38,9 +46,9 @@ const MyCollections = () => {
           id: index,
           name: item.category_name,
           documents: item.count,
+          docs: item.documents || [],
           // Cycle through colorOptions based on index
           color: colorOptions[index % colorOptions.length],
-          size: "Calculated dynamically" 
         }));
 
         setCollections(formattedData);
@@ -104,7 +112,10 @@ const MyCollections = () => {
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.3, delay: index * 0.05 }}
             >
-              <Card className="hover:shadow-lg transition-all duration-200 border-slate-200 dark:border-slate-800 group cursor-pointer">
+              <Card 
+                className="hover:shadow-lg transition-all duration-200 border-slate-200 dark:border-slate-800 group cursor-pointer"
+                onClick={() => setSelectedCollection(collection)}
+              >
                 <CardContent className="p-6">
                   <div className="flex items-start justify-between mb-4">
                     <div className={`p-3 rounded-lg ${colorMap[collection.color]}`}>
@@ -136,6 +147,51 @@ const MyCollections = () => {
             </motion.div>
           ))}
         </div>
+
+        {/* Document List Dialog */}
+        <Dialog open={!!selectedCollection} onOpenChange={(open) => !open && setSelectedCollection(null)}>
+          <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+            <DialogHeader>
+              <DialogTitle className="text-2xl flex items-center gap-3">
+                <div className={`p-2 rounded-lg ${selectedCollection ? colorMap[selectedCollection.color] : ''}`}>
+                  <FolderOpen className="w-5 h-5" />
+                </div>
+                {selectedCollection?.name}
+              </DialogTitle>
+            </DialogHeader>
+            
+            <div className="flex-1 overflow-y-auto mt-4 pr-2">
+              <div className="space-y-3">
+                {selectedCollection?.docs.map((doc) => (
+                  <div 
+                    key={doc.id}
+                    className="flex items-center justify-between p-4 rounded-xl border border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors group"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-500">
+                        <FileText className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <p className="font-medium text-slate-900 dark:text-white truncate max-w-[300px]">
+                          {doc.name}
+                        </p>
+                      </div>
+                    </div>
+                    <Button 
+                      variant="outline" 
+                      size="sm"
+                      className="opacity-0 group-hover:opacity-100 transition-opacity"
+                      onClick={() => window.open(doc.url, '_blank')}
+                    >
+                      <ExternalLink className="w-4 h-4 mr-2" />
+                      Open PDF
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
       </motion.div>
     </div>
   );
