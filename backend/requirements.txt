@@ -7,3 +7,11 @@ sentence-transformers
 openai
 pydantic-settings
 pymupdf
+
+# Auth & Security — Step 1
+supabase
+python-jose[cryptography]
+cryptography
+argon2-cffi
+httpx
+pydantic[email]

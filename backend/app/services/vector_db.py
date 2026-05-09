@@ -20,8 +20,13 @@ class VectorDBService:
                 os.path.join(os.path.dirname(__file__), "..", "..", "qdrant_storage")
             )
             os.makedirs(storage_path, exist_ok=True)
+            print(f"[QDRANT] Initializing database at: {storage_path}")
             cls._instance.client = QdrantClient(path=storage_path)
-            cls._instance.encoder = SentenceTransformer("all-MiniLM-L6-v2")  # 384-dim
+            
+            print("[AI] Loading SentenceTransformer model (this may take a minute on first run)...")
+            cls._instance.encoder = SentenceTransformer("all-MiniLM-L6-v2")
+            print("[AI] Model loaded successfully.")
+            
             cls._instance.collection_name = "user_documents"
             cls._instance._ensure_collection_exists()
         return cls._instance

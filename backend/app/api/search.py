@@ -1,115 +1,101 @@
-from fastapi import APIRouter, HTTPException
-from app.services.vector_db import VectorDBService
+"""
+search.py — Authenticated Search & Collections
+===============================================
+All queries are scoped to the authenticated user's documents only.
+The user_id from the verified JWT is used to filter Qdrant results —
+users can never see other users' documents.
+"""
+
 from collections import defaultdict
+
+from fastapi import APIRouter, Depends, HTTPException
+from app.core.security import get_current_user
+from app.services.vector_db import VectorDBService
+from qdrant_client.http import models
 
 router = APIRouter(prefix="/collections", tags=["Collections"])
 vector_db = VectorDBService()
 
+
 @router.get("/summary")
-async def get_dynamic_collections():
+async def get_dynamic_collections(
+    current_user: dict = Depends(get_current_user),
+):
     """
-    Fetches all documents and groups them by the categories 
-    assigned by the AI for the 'My Collections' view.
+    Fetch documents belonging to the authenticated user, grouped by AI category.
+
+    Filters Qdrant by user_id (injected from JWT) so each user sees only
+    their own collections.
     """
+    user_id = current_user.get("sub")
+
     try:
-        # 1. Retrieve all stored points from Qdrant [cite: 41, 557]
+        # Filter scroll to only this user's documents
         points, _ = vector_db.client.scroll(
             collection_name=vector_db.collection_name,
+            scroll_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="user_id",
+                        match=models.MatchValue(value=user_id),
+                    )
+                ]
+            ),
             with_payload=True,
-            limit=100
+            limit=200,
         )
 
         category_map = defaultdict(list)
-        
+
         for point in points:
             payload = point.payload
             cat_name = payload.get("category", "Unsorted")
-            
-            # Construct a local URL pointing to your FastAPI static mount
             file_url = f"http://localhost:8000/static/{payload.get('bucket_path', '')}"
-            
+
             category_map[cat_name].append({
                 "id": point.id,
                 "name": payload.get("original_name"),
                 "url": file_url,
-                "file_key": payload.get("bucket_path")
+                "file_key": payload.get("bucket_path"),
             })
 
-        # 2. Format as a list for the frontend .map() function
-        summary = []
-        for cat, docs in category_map.items():
-            summary.append({
+        summary = [
+            {
                 "category_name": cat,
                 "count": len(docs),
-                "documents": docs
-            })
+                "documents": docs,
+            }
+            for cat, docs in category_map.items()
+        ]
 
         return summary
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/query")
-async def semantic_search(q: str):
+async def semantic_search(
+    q: str,
+    current_user: dict = Depends(get_current_user),
+):
     """
-    Semantic search across all local documents[cite: 36, 48].
+    User-scoped semantic search.
+
+    Searches only within documents belonging to the authenticated user.
+    Results from other users are never returned.
     """
-    results = await vector_db.search(query=q, limit=5)
-    
-    return [{
-        "name": res.payload["original_name"],
-        "category": res.payload["category"],
-        "url": f"http://localhost:8000/static/{res.payload.get('bucket_path', '')}",
-        "score": res.score
-    } for res in results]
+    user_id = current_user.get("sub")
 
+    # Search with user_id filter — user-level isolation at vector DB level
+    results = await vector_db.search(query=q, limit=5, user_id=user_id)
 
-
-
-
-#with Cloudfare R2
-# from fastapi import APIRouter
-# from app.services.vector_db import VectorDBService
-# from app.services.cloud_storage import R2Service
-# from collections import defaultdict
-
-# router = APIRouter(prefix="/collections", tags=["Collections"])
-# vector_db = VectorDBService()
-# r2_service = R2Service()
-
-# @router.get("/summary")
-# async def get_dynamic_summary():
-#     # 1. Get all documents from Qdrant
-#     points, _ = vector_db.client.scroll(
-#         collection_name=vector_db.collection_name,
-#         with_payload=True,
-#         limit=100
-#     )
-
-#     # 2. Dynamic Grouping: We don't know the categories until we see the data
-#     category_map = defaultdict(list)
-    
-#     for point in points:
-#         payload = point.payload
-#         # If Qwen labeled it "Electricity Bill", that becomes a new category
-#         cat_name = payload.get("category", "Unsorted")
-        
-#         view_url = r2_service.get_signed_url(payload["r2_key"])
-        
-#         category_map[cat_name].append({
-#             "id": point.id,
-#             "name": payload.get("original_name"),
-#             "url": view_url
-#         })
-
-#     # 3. Format for Frontend
-#     # This sends a list of categories and their counts
-#     summary = []
-#     for cat, docs in category_map.items():
-#         summary.append({
-#             "category_name": cat,
-#             "count": len(docs),
-#             "documents": docs
-#         })
-
-#     return summary
+    return [
+        {
+            "name": res.payload["original_name"],
+            "category": res.payload["category"],
+            "url": f"http://localhost:8000/static/{res.payload.get('bucket_path', '')}",
+            "score": res.score,
+        }
+        for res in results
+    ]

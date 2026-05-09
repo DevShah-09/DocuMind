@@ -29,12 +29,14 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { toast } from 'sonner';
+import { useAuth } from '@/contexts/AuthContext';
 
 const MyCollections = () => {
   const [collections, setCollections] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedCollection, setSelectedCollection] = useState(null);
   const [docToDelete, setDocToDelete] = useState(null);
+  const { getAccessToken } = useAuth();
 
   // Map of available colors for dynamic categories
   const colorOptions = ['blue', 'green', 'purple', 'orange', 'pink', 'cyan'];
@@ -49,22 +51,52 @@ const MyCollections = () => {
   };
 
   const fetchCollections = async () => {
+    setLoading(true);
+    console.log("Fetching collections...");
     try {
-      const response = await fetch('http://localhost:8000/collections/summary');
-      const data = await response.json();
+      const token = getAccessToken();
+      if (!token) {
+        console.warn("No token available for fetchCollections");
+        setLoading(false);
+        return;
+      }
+
+      const response = await fetch('http://localhost:8000/collections/summary', {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
       
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        console.error("Fetch collections failed:", response.status, err);
+        toast.error("Failed to load collections");
+        setLoading(false);
+        return;
+      }
+
+      const data = await response.json();
+      console.log("Collections data received:", data);
+      
+      if (!Array.isArray(data)) {
+        console.error("Expected array for collections, got:", typeof data);
+        setCollections([]);
+        setLoading(false);
+        return;
+      }
+
       const formattedData = data.map((item, index) => ({
         id: index,
         name: item.category_name,
         documents: item.count,
         docs: item.documents || [],
-        // Cycle through colorOptions based on index
         color: colorOptions[index % colorOptions.length],
       }));
 
       setCollections(formattedData);
     } catch (error) {
       console.error("Failed to fetch collections:", error);
+      toast.error("An error occurred while fetching collections");
     } finally {
       setLoading(false);
     }
@@ -78,8 +110,12 @@ const MyCollections = () => {
     if (!docToDelete) return;
 
     try {
+      const token = getAccessToken();
       const response = await fetch(`http://localhost:8000/documents/${docToDelete.id}`, {
         method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
       });
 
       if (response.ok) {
@@ -101,6 +137,43 @@ const MyCollections = () => {
       toast.error('An error occurred while deleting');
     } finally {
       setDocToDelete(null);
+    }
+  };
+
+  const handleViewDocument = async (doc) => {
+    console.log("Viewing document:", doc);
+    try {
+      const token = getAccessToken();
+      if (!token) {
+        toast.error("You are not logged in");
+        return;
+      }
+
+      const response = await fetch(`http://localhost:8000/documents/view/${doc.id}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        console.error("Backend error:", errorData);
+        throw new Error('Failed to fetch decrypted document');
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      
+      // Open in a new tab
+      const newWindow = window.open(url, '_blank');
+      if (!newWindow) {
+        toast.error("Popup blocked! Please allow popups for this site.");
+      }
+      
+      console.log("Document opened successfully");
+    } catch (error) {
+      console.error('View error:', error);
+      toast.error('Failed to open document: ' + error.message);
     }
   };
 
@@ -224,7 +297,7 @@ const MyCollections = () => {
                         variant="outline" 
                         size="sm"
                         className="opacity-0 group-hover:opacity-100 transition-opacity"
-                        onClick={() => window.open(doc.url, '_blank')}
+                        onClick={() => handleViewDocument(doc)}
                       >
                         <ExternalLink className="w-4 h-4 mr-2" />
                         Open PDF

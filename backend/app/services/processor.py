@@ -14,7 +14,15 @@ class DocumentOrchestrator:
         self.storage = LocalStorageService()
         self.vector_db = VectorDBService()
 
-    async def process_and_store(self, file_content: bytes, original_name: str, content_type: str, user_id: str = "test_user_123"):
+    async def process_and_store(
+        self, 
+        file_content: bytes, 
+        encrypted_content: bytes,
+        original_name: str, 
+        content_type: str, 
+        user_id: str,
+        file_id: str
+    ):
         # Metadata Generation
         file_hash = hashlib.sha256(file_content).hexdigest()
         
@@ -24,7 +32,7 @@ class DocumentOrchestrator:
             print(f"[PROCESSOR] Duplicate detected: {original_name} already exists.")
             raise ValueError("This file already exists in your collections.")
 
-        doc_id = str(uuid.uuid4())
+        doc_id = file_id  # Use the shared file_id from API
         upload_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         # Step 1: Pre-process file into Base64 images
@@ -83,9 +91,9 @@ class DocumentOrchestrator:
         if not text_content:
             text_content = original_name
 
-        # Step 3: Storage in Local Disk
+        # Step 3: Storage in Local Disk (USE ENCRYPTED CONTENT)
         file_key = f"{doc_id}-{original_name}"
-        await self.storage.upload_file(file_content, file_key, content_type)
+        await self.storage.upload_file(encrypted_content, file_key, content_type)
 
         # Step 4: Index in Qdrant Vector DB
         payload = {

@@ -14,6 +14,14 @@ class LocalStorageService:
             f.write(file_content)
         return file_path
 
+    async def download_file(self, file_name: str) -> bytes:
+        """Reads the file from local disk."""
+        file_path = os.path.join(self.upload_dir, file_name)
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File {file_name} not found in storage")
+        with open(file_path, "rb") as f:
+            return f.read()
+
     def get_local_url(self, file_name: str):
         """Returns a local static URL for the frontend to display the file."""
         return f"http://localhost:8000/static/{file_name}"

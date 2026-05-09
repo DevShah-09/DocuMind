@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { toast } from 'sonner';
+import { useAuth } from '@/contexts/AuthContext';
 
 // Map category slugs to display labels + colors
 const CATEGORY_META = {
@@ -179,6 +180,7 @@ const UploadDocuments = () => {
   const [currentFile, setCurrentFile]   = useState('');
   const [results, setResults]           = useState([]);
   const [error, setError]               = useState(null);
+  const { getAccessToken } = useAuth();
   const fileInputRef                    = useRef(null);
 
   // ── Drag handlers ──────────────────────────────────────────────────────────
@@ -248,8 +250,12 @@ const UploadDocuments = () => {
       const formData = new FormData();
       formData.append('file', file);
 
+      const token = getAccessToken();
       const response = await fetch('http://localhost:8000/documents/upload', {
         method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
         body: formData,
       });
 
