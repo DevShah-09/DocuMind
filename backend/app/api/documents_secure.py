@@ -116,8 +116,8 @@ async def view_document(
     assert_owns_resource(current_user, doc.payload.get("user_id"))
 
     # 3. Read encrypted file from storage
-    from app.services.cloud_storage import LocalStorageService
-    storage = LocalStorageService()
+    from app.services.cloud_storage import S3StorageService
+    storage = S3StorageService()
     
     bucket_path = doc.payload.get("bucket_path")
     try:

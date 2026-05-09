@@ -5,13 +5,13 @@ import hashlib
 import base64
 import fitz  # PyMuPDF
 from app.services.vision_model import VisionProcessor
-from app.services.cloud_storage import LocalStorageService
+from app.services.cloud_storage import S3StorageService
 from app.services.vector_db import VectorDBService
 
 class DocumentOrchestrator:
     def __init__(self):
         self.vision = VisionProcessor()
-        self.storage = LocalStorageService()
+        self.storage = S3StorageService()
         self.vector_db = VectorDBService()
 
     async def process_and_store(

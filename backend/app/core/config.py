@@ -3,11 +3,11 @@ from typing import List
 
 
 class Settings(BaseSettings):
-    # ── Cloudflare R2 ──────────────────────────────────────────
-    R2_ACCOUNT_ID: str = ""
-    R2_ACCESS_KEY: str = ""
-    R2_SECRET_KEY: str = ""
-    R2_BUCKET_NAME: str = ""
+    # ── AWS S3 ────────────────────────────────────────────────
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_REGION: str = "eu-north-1"
+    AWS_S3_BUCKET: str = ""
 
     # ── Qdrant ─────────────────────────────────────────────────
     QDRANT_HOST: str = "localhost"
