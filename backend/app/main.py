@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api import upload, search
 from app.api.auth import router as auth_router
 from app.api.documents_secure import router as documents_secure_router
+from app.api.retrieval import router as retrieval_router
 from app.core.config import settings
 
 logging.basicConfig(level=logging.INFO)
@@ -19,6 +20,8 @@ app = FastAPI(
 )
 
 # ── Static file mount (local storage fallback) ─────────────────────────────────
+import os as _os
+_os.makedirs("local_storage", exist_ok=True)
 app.mount("/static", StaticFiles(directory="local_storage"), name="static")
 
 # ── Security Headers Middleware ────────────────────────────────────────────────
@@ -49,6 +52,7 @@ app.include_router(auth_router)               # /auth/*  /me
 app.include_router(upload.router)             # /documents/upload  /documents/{id}
 app.include_router(search.router)             # /collections/*
 app.include_router(documents_secure_router)   # /documents/generate-signed-url/*
+app.include_router(retrieval_router)          # /search/*  /documents/{id}  /documents/{id}/preview
 
 # ── CORS (OUTERMOST MIDDLEWARE) ────────────────────────────────────────────────
 # We add this LAST so it's the first thing that catches incoming requests 

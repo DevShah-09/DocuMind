@@ -8,10 +8,16 @@ openai
 pydantic-settings
 pymupdf
 
-# Auth & Security — Step 1
+# Auth & Security
 supabase
 python-jose[cryptography]
 cryptography
 argon2-cffi
 httpx
 pydantic[email]
+
+# Hybrid Retrieval Pipeline
+torch                    # required by sentence-transformers (BGE model)
+transformers             # tokeniser for bge-base-en-v1.5
+einops                   # required by some BGE model variants
+accelerate               # optional — speeds up model loading

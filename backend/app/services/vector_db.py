@@ -1,6 +1,7 @@
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from sentence_transformers import SentenceTransformer
+from app.core.qdrant_client_singleton import shared_qdrant_client
 import os
 
 
@@ -15,13 +16,9 @@ class VectorDBService:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            # Local file-based Qdrant — no Docker/server required
-            storage_path = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), "..", "..", "qdrant_storage")
-            )
-            os.makedirs(storage_path, exist_ok=True)
-            print(f"[QDRANT] Initializing database at: {storage_path}")
-            cls._instance.client = QdrantClient(path=storage_path)
+            # Use the shared client — prevents storage lock conflict
+            cls._instance.client = shared_qdrant_client
+            print(f"[QDRANT] VectorDBService using shared client")
             
             print("[AI] Loading SentenceTransformer model (this may take a minute on first run)...")
             cls._instance.encoder = SentenceTransformer("all-MiniLM-L6-v2")
@@ -59,14 +56,28 @@ class VectorDBService:
         )
         print(f"[QDRANT] Upserted doc_id={doc_id}")
 
-    async def search(self, query: str, limit: int = 5):
+    async def search(self, query: str, limit: int = 5, user_id: str = None):
         """Semantic search across stored documents."""
         query_vector = self.encoder.encode(query).tolist()
-        return self.client.search(
+        
+        query_filter = None
+        if user_id:
+            query_filter = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="user_id",
+                        match=models.MatchValue(value=user_id),
+                    )
+                ]
+            )
+
+        response = self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_vector,
+            query=query_vector,
+            query_filter=query_filter,
             limit=limit,
         )
+        return response.points
 
     async def check_duplicate(self, file_hash: str):
         """Checks if a document with the same file_hash already exists."""

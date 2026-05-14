@@ -1,273 +1,474 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Mic, Paperclip, Send, ChevronRight, ChevronLeft, Sparkles, FileText } from 'lucide-react';
+import {
+  Search, Send, ChevronRight, ChevronLeft, Sparkles,
+  FileText, ExternalLink, Eye, Calendar, Tag, Loader2,
+  AlertCircle, X, Download, ZoomIn, ZoomOut, RotateCw
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Switch } from '@/components/ui/switch';
-import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { useAuth } from '@/contexts/AuthContext';
+import { useSearchParams } from 'react-router-dom';
 
+const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+
+// ── API helper ─────────────────────────────────────────────────────────────────
+async function hybridSearch(query, token) {
+  const res = await fetch(`${API_BASE}/search`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ query, limit: 3, score_threshold: 0.15 }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Search failed (${res.status})`);
+  }
+  return res.json();
+}
+
+async function fetchPreviewUrl(documentId, token) {
+  const res = await fetch(`${API_BASE}/documents/${documentId}/preview`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error('Could not load preview');
+  const data = await res.json();
+  return data.preview_url;
+}
+
+// ── Score → colour helper ──────────────────────────────────────────────────────
+function scoreColor(score) {
+  if (score >= 0.75) return 'text-emerald-600 dark:text-emerald-400';
+  if (score >= 0.50) return 'text-amber-600 dark:text-amber-400';
+  return 'text-slate-500 dark:text-slate-400';
+}
+
+function scoreBg(score) {
+  if (score >= 0.75) return 'bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800';
+  if (score >= 0.50) return 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800';
+  return 'bg-slate-50 dark:bg-slate-800/50 border-slate-200 dark:border-slate-700';
+}
+
+
+
+// ── Result Card ────────────────────────────────────────────────────────────────
+function ResultCard({ result, rank, token, onPreview }) {
+  const scorePercent = Math.round(result.score * 100);
+  const docTypePretty = (result.document_type || 'document')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+
+  return (
+    <Card className={`p-4 border transition-all hover:shadow-md ${scoreBg(result.score)}`}>
+      <div className="space-y-3">
+        {/* Header row */}
+        <div className="flex items-start justify-between gap-2">
+          <Badge className="bg-cyan-100 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-400 border-0 text-xs">
+            #{rank}
+          </Badge>
+          <span className={`text-xs font-bold ${scoreColor(result.score)}`}>
+            {scorePercent}% match
+          </span>
+        </div>
+
+        {/* Filename */}
+        <div>
+          <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-0.5">Document</p>
+          <p className="text-sm font-semibold text-slate-900 dark:text-white leading-tight line-clamp-2">
+            {result.filename}
+          </p>
+        </div>
+
+        {/* Doc type + date */}
+        <div className="flex flex-wrap gap-1.5">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs
+                           bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300">
+            <Tag className="w-3 h-3" />
+            {docTypePretty}
+          </span>
+          {(result.year || result.month) && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs
+                             bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+              <Calendar className="w-3 h-3" />
+              {[result.month, result.year].filter(Boolean).join(' ')}
+            </span>
+          )}
+        </div>
+
+        {/* Summary */}
+        {result.summary && (
+          <div>
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-0.5">Summary</p>
+            <p className="text-xs text-slate-600 dark:text-slate-300 line-clamp-3 leading-relaxed">
+              {result.summary}
+            </p>
+          </div>
+        )}
+
+        {/* Best chunk preview */}
+        {result.matched_chunks?.[0]?.text && (
+          <div>
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-0.5">Matched text</p>
+            <p className="text-xs text-slate-600 dark:text-slate-300 line-clamp-2 leading-relaxed italic">
+              "…{result.matched_chunks[0].text.slice(0, 180)}…"
+            </p>
+          </div>
+        )}
+
+        {/* Action button */}
+        <Button
+          onClick={() => onPreview(result)}
+          size="sm"
+          className="w-full text-xs bg-gradient-to-r from-cyan-600 to-cyan-500
+                     hover:from-cyan-500 hover:to-cyan-600 text-white gap-1.5"
+        >
+          <Eye className="w-3.5 h-3.5" />
+          View PDF
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+// ── Main Component ─────────────────────────────────────────────────────────────
 const QueryInterface = () => {
-  const [query, setQuery] = useState('');
+  const { getAccessToken } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
+  
+  const [query, setQuery] = useState(searchParams.get('q') || '');
   const [messages, setMessages] = useState([]);
+  const [searchResults, setSearchResults] = useState([]);
   const [showRightPanel, setShowRightPanel] = useState(true);
-  const [selectedCollection, setSelectedCollection] = useState('all');
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const messagesEndRef = useRef(null);
 
-  const mockRetrievedChunks = [
-    {
-      id: 1,
-      similarity: 94.2,
-      rank: 1,
-      document: 'Research_Paper_AI_2024.pdf',
-      content: 'Large language models have demonstrated remarkable capabilities in understanding and generating human-like text...'
-    },
-    {
-      id: 2,
-      similarity: 89.7,
-      rank: 2,
-      document: 'Technical_Specs_v2.docx',
-      content: 'The vector database implementation uses cosine similarity for efficient document retrieval...'
-    },
-    {
-      id: 3,
-      similarity: 87.3,
-      rank: 3,
-      document: 'Documentation_Guide.pdf',
-      content: 'When implementing RAG systems, it is crucial to maintain proper chunk size and overlap...'
-    },
-  ];
+  // Auto-scroll to latest message
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
-  const handleSendQuery = () => {
-    if (!query.trim()) return;
+  // Execute search if query param is present on mount
+  const hasSearched = useRef(false);
+  useEffect(() => {
+    const q = searchParams.get('q');
+    if (q && !hasSearched.current) {
+      hasSearched.current = true;
+      const originalQuery = query;
+      setQuery(q);
+      // Wait for React to update the state, then execute search
+      setTimeout(() => {
+        document.getElementById('send-button')?.click();
+      }, 100);
+    }
+  }, [searchParams]);
 
-    const newMessage = {
-      id: Date.now(),
-      type: 'user',
-      content: query,
-      timestamp: new Date().toLocaleTimeString(),
-    };
+  const handlePreviewClick = async (result) => {
+    // Open tab immediately to bypass popup blocker
+    const newWindow = window.open('', '_blank');
+    if (newWindow) {
+      newWindow.document.write('<div style="font-family: sans-serif; padding: 2rem; text-align: center; color: #666;">Loading secure document...</div>');
+    }
+    
+    try {
+      const url = await fetchPreviewUrl(result.document_id, getAccessToken());
+      if (newWindow) {
+        newWindow.location.href = url;
+      } else {
+        window.location.href = url;
+      }
+    } catch (e) {
+      console.error(e);
+      if (newWindow) newWindow.close();
+      alert("Failed to load document preview");
+    }
+  };
 
-    setMessages([...messages, newMessage]);
+  const handleSendQuery = async () => {
+    const q = query.trim();
+    if (!q || isLoading) return;
 
-    // Simulate AI response
-    setTimeout(() => {
-      const aiResponse = {
-        id: Date.now() + 1,
-        type: 'ai',
-        content: 'Based on the retrieved documents, I can provide you with comprehensive information about your query. The analysis shows multiple relevant sources that address your question with high confidence.',
-        confidence: 92,
-        sources: 3,
-        timestamp: new Date().toLocaleTimeString(),
-      };
-      setMessages(prev => [...prev, aiResponse]);
-    }, 1000);
+    const token = getAccessToken();
+    if (!token) return;
 
+    // Add user message
+    setMessages((prev) => [
+      ...prev,
+      { id: Date.now(), type: 'user', content: q, timestamp: new Date().toLocaleTimeString() },
+    ]);
+    
+    // Persist query in URL params
+    setSearchParams({ q });
+    
     setQuery('');
+    setIsLoading(true);
+    setSearchResults([]);
+
+    try {
+      const data = await hybridSearch(q, token);
+      const results = data.results || [];
+      setSearchResults(results);
+
+      // Build AI response message
+      const topResult = results[0];
+      let aiContent;
+      if (results.length === 0) {
+        aiContent = `No documents matched "${q}". Try a different query or upload more documents.`;
+      } else {
+        const topScore = Math.round(topResult.score * 100);
+        const latency = data.latency_ms ? ` (${Math.round(data.latency_ms)}ms)` : '';
+        aiContent = `Found ${results.length} matching document${results.length > 1 ? 's' : ''} for "${q}"${latency}. `
+          + `Best match: **${topResult.filename}** with ${topScore}% relevance. `
+          + (topResult.summary ? `\n\n${topResult.summary}` : '');
+      }
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now() + 1,
+          type: 'ai',
+          content: aiContent,
+          resultCount: results.length,
+          parsedQuery: data.parsed_query,
+          latency: data.latency_ms,
+          timestamp: new Date().toLocaleTimeString(),
+        },
+      ]);
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now() + 1,
+          type: 'error',
+          content: err.message || 'Search failed. Please try again.',
+          timestamp: new Date().toLocaleTimeString(),
+        },
+      ]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
-    <div className="h-screen flex" data-testid="query-interface">
-      {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col">
-        {/* Top Search Bar */}
-        <div className="px-8 py-6 border-b border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-slate-900/50 backdrop-blur-sm">
-          <div className="max-w-4xl mx-auto">
-            <div className="relative">
-              <Search className="absolute left-6 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" strokeWidth={1.5} />
-              <Input
-                placeholder="Ask anything about your documents..."
-                className="h-14 pl-14 pr-32 text-lg rounded-xl border-slate-200 dark:border-slate-800 shadow-lg focus:ring-2 focus:ring-cyan-500 dark:bg-slate-900"
-                data-testid="search-input"
-              />
-              <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">
-                <Button variant="ghost" size="icon" className="rounded-full" data-testid="mic-button">
-                  <Mic className="w-5 h-5 text-slate-600 dark:text-slate-400" strokeWidth={1.5} />
-                </Button>
-                <Select value={selectedCollection} onValueChange={setSelectedCollection}>
-                  <SelectTrigger className="w-32 h-9 rounded-lg" data-testid="collection-select">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All</SelectItem>
-                    <SelectItem value="research">Research</SelectItem>
-                    <SelectItem value="docs">Docs</SelectItem>
-                    <SelectItem value="legal">Legal</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+    <div className="h-screen flex relative" data-testid="query-interface">
+      {/* ── Main Chat Area ───────────────────────────────────────────────────── */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Top header */}
+        <div className="px-6 py-5 border-b border-slate-200 dark:border-slate-800 bg-white/60 dark:bg-slate-900/60 backdrop-blur-sm">
+          <div className="max-w-3xl mx-auto flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-gradient-to-br from-cyan-500 to-cyan-600">
+              <Sparkles className="w-5 h-5 text-white" strokeWidth={1.5} />
             </div>
-
-            {/* Advanced Toggle */}
-            <div className="flex items-center gap-2 mt-4">
-              <Switch
-                id="advanced"
-                checked={showAdvanced}
-                onCheckedChange={setShowAdvanced}
-                data-testid="advanced-toggle"
-              />
-              <Label htmlFor="advanced" className="text-sm text-slate-600 dark:text-slate-400 cursor-pointer">
-                Advanced Options
-              </Label>
+            <div>
+              <h1 className="text-base font-semibold text-slate-900 dark:text-white">Document Intelligence</h1>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Ask anything — your PDFs will be returned</p>
             </div>
-
-            {/* Advanced Options */}
-            <AnimatePresence>
-              {showAdvanced && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="mt-4 flex gap-4"
-                >
-                  <div className="flex items-center gap-2">
-                    <Switch id="reranker" data-testid="reranker-toggle" />
-                    <Label htmlFor="reranker" className="text-sm">Use Re-Ranker</Label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Switch id="reasoning" data-testid="reasoning-toggle" />
-                    <Label htmlFor="reasoning" className="text-sm">Show Reasoning</Label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Switch id="strict" data-testid="strict-toggle" />
-                    <Label htmlFor="strict" className="text-sm">Strict Context</Label>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
           </div>
         </div>
 
-        {/* Chat Messages */}
-        <ScrollArea className="flex-1 px-8 py-8">
-          <div className="max-w-4xl mx-auto space-y-6">
+        {/* Messages */}
+        <ScrollArea className="flex-1 px-6 py-6">
+          <div className="max-w-3xl mx-auto space-y-5">
             {messages.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full py-20" data-testid="empty-state">
-                <div className="p-6 rounded-2xl bg-slate-100 dark:bg-slate-800 mb-6">
-                  <Sparkles className="w-12 h-12 text-cyan-500" strokeWidth={1.5} />
+              <div className="flex flex-col items-center justify-center py-24" data-testid="empty-state">
+                <div className="p-5 rounded-2xl bg-slate-100 dark:bg-slate-800 mb-5">
+                  <Search className="w-10 h-10 text-cyan-500" strokeWidth={1.5} />
                 </div>
-                <h2 className="text-2xl font-semibold text-slate-900 dark:text-white mb-2">Ready to assist you</h2>
-                <p className="text-slate-600 dark:text-slate-400 text-center max-w-md">
-                  Ask any question about your documents and I'll provide accurate answers with source references
+                <h2 className="text-xl font-semibold text-slate-900 dark:text-white mb-2">
+                  Search your documents
+                </h2>
+                <p className="text-slate-500 dark:text-slate-400 text-center text-sm max-w-sm">
+                  Try: "Give me SSC marksheet", "Show SBI bank statement from January 2024",
+                  or "Find insurance papers"
                 </p>
+                <div className="flex flex-wrap gap-2 mt-5 justify-center">
+                  {[
+                    'Show my latest bank statement',
+                    'Find electricity bill 2024',
+                    'Medical report with diabetes',
+                  ].map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => setQuery(s)}
+                      className="px-3 py-1.5 text-xs rounded-full border border-slate-200 dark:border-slate-700
+                                 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300
+                                 hover:border-cyan-400 hover:text-cyan-600 transition-colors"
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
               </div>
             ) : (
-              <AnimatePresence>
+              <AnimatePresence initial={false}>
                 {messages.map((message) => (
                   <motion.div
                     key={message.id}
-                    initial={{ opacity: 0, scale: 0.95, y: 10 }}
-                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
                     className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
                   >
                     {message.type === 'user' ? (
-                      <div className="bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-2xl rounded-tr-sm px-5 py-3.5 max-w-[80%]" data-testid="user-message">
+                      <div className="bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-slate-100
+                                      rounded-2xl rounded-tr-sm px-4 py-3 max-w-[80%] text-sm"
+                           data-testid="user-message">
                         {message.content}
                       </div>
+                    ) : message.type === 'error' ? (
+                      <div className="flex items-start gap-2 max-w-[90%]">
+                        <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0" />
+                        <p className="text-sm text-red-500">{message.content}</p>
+                      </div>
                     ) : (
-                      <div className="w-full space-y-4" data-testid="ai-message">
-                        <div className="bg-transparent text-slate-800 dark:text-slate-200 rounded-2xl py-3.5 leading-relaxed">
+                      <div className="w-full space-y-3" data-testid="ai-message">
+                        <div className="text-sm text-slate-700 dark:text-slate-200 leading-relaxed whitespace-pre-wrap">
                           {message.content}
                         </div>
-                        <div className="flex items-center gap-4">
-                          <Badge variant="outline" className="bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800">
-                            Confidence: {message.confidence}%
-                          </Badge>
-                          <Badge variant="outline" className="bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400 border-blue-200 dark:border-blue-800">
-                            {message.sources} sources
-                          </Badge>
+                        <div className="flex items-center flex-wrap gap-2">
+                          {message.resultCount > 0 && (
+                            <Badge variant="outline"
+                                   className="bg-cyan-50 dark:bg-cyan-900/20 text-cyan-700 dark:text-cyan-400
+                                              border-cyan-200 dark:border-cyan-800 text-xs">
+                              {message.resultCount} document{message.resultCount > 1 ? 's' : ''} found
+                            </Badge>
+                          )}
+                          {message.parsedQuery?.document_type && (
+                            <Badge variant="outline"
+                                   className="bg-violet-50 dark:bg-violet-900/20 text-violet-700
+                                              dark:text-violet-400 border-violet-200 dark:border-violet-800 text-xs">
+                              {message.parsedQuery.document_type.replace(/_/g, ' ')}
+                            </Badge>
+                          )}
+                          {message.parsedQuery?.year && (
+                            <Badge variant="outline"
+                                   className="bg-slate-50 dark:bg-slate-800 text-slate-600
+                                              dark:text-slate-300 border-slate-200 dark:border-slate-700 text-xs">
+                              {message.parsedQuery.year}
+                            </Badge>
+                          )}
+                          {message.latency && (
+                            <span className="text-xs text-slate-400 dark:text-slate-500">
+                              {Math.round(message.latency)}ms
+                            </span>
+                          )}
                         </div>
                       </div>
                     )}
                   </motion.div>
                 ))}
+                {/* Loading indicator */}
+                {isLoading && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="flex items-center gap-3 text-slate-500 dark:text-slate-400"
+                  >
+                    <Loader2 className="w-4 h-4 animate-spin text-cyan-500" />
+                    <span className="text-sm">Searching your documents…</span>
+                  </motion.div>
+                )}
               </AnimatePresence>
             )}
+            <div ref={messagesEndRef} />
           </div>
         </ScrollArea>
 
         {/* Bottom Input */}
-        <div className="px-8 py-6 border-t border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-slate-900/50 backdrop-blur-sm">
-          <div className="max-w-4xl mx-auto">
+        <div className="px-6 py-5 border-t border-slate-200 dark:border-slate-800
+                        bg-white/60 dark:bg-slate-900/60 backdrop-blur-sm">
+          <div className="max-w-3xl mx-auto">
             <div className="relative">
               <Input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && handleSendQuery()}
-                placeholder="Type your query here..."
-                className="h-14 pl-6 pr-28 rounded-xl border-slate-200 dark:border-slate-800"
+                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSendQuery()}
+                placeholder="e.g. Give me SSC marksheet, Show SBI bank statement from Jan 2024…"
+                disabled={isLoading}
+                className="h-13 pl-5 pr-14 rounded-xl border-slate-200 dark:border-slate-800
+                           focus:ring-2 focus:ring-cyan-500 text-sm disabled:opacity-60"
                 data-testid="query-input"
               />
-              <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">
-                <Button variant="ghost" size="icon" className="rounded-full" data-testid="attach-button">
-                  <Paperclip className="w-5 h-5 text-slate-600 dark:text-slate-400" strokeWidth={1.5} />
-                </Button>
-                <Button
-                  onClick={handleSendQuery}
-                  className="bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-600 text-white rounded-full w-10 h-10 p-0"
-                  data-testid="send-button"
-                >
-                  <Send className="w-5 h-5" strokeWidth={2} />
-                </Button>
-              </div>
+              <Button
+                onClick={handleSendQuery}
+                disabled={!query.trim() || isLoading}
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-9 h-9 p-0 rounded-lg
+                           bg-gradient-to-r from-cyan-600 to-cyan-500
+                           hover:from-cyan-500 hover:to-cyan-600 text-white disabled:opacity-40"
+                data-testid="send-button"
+              >
+                {isLoading
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : <Send className="w-4 h-4" strokeWidth={2} />
+                }
+              </Button>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Right Panel - Retrieved Documents */}
+      {/* ── Right Panel — Retrieved Documents ────────────────────────────────── */}
       <AnimatePresence>
         {showRightPanel && (
           <motion.div
             initial={{ width: 0, opacity: 0 }}
-            animate={{ width: 320, opacity: 1 }}
+            animate={{ width: 340, opacity: 1 }}
             exit={{ width: 0, opacity: 0 }}
-            className="border-l border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/70 backdrop-blur-xl overflow-hidden"
+            transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+            className="border-l border-slate-200 dark:border-slate-800
+                       bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl overflow-hidden flex-shrink-0"
             data-testid="right-panel"
           >
-            <div className="h-full flex flex-col">
-              <div className="px-6 py-6 border-b border-slate-200 dark:border-slate-800">
-                <h3 className="text-lg font-semibold text-slate-900 dark:text-white flex items-center gap-2">
-                  <FileText className="w-5 h-5 text-cyan-500" strokeWidth={1.5} />
-                  Retrieved Sources
+            <div className="h-full flex flex-col w-[340px]">
+              {/* Panel header */}
+              <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                  <FileText className="w-4 h-4 text-cyan-500" strokeWidth={1.5} />
+                  Retrieved Documents
                 </h3>
+                {searchResults.length > 0 && (
+                  <Badge className="bg-cyan-100 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-400 border-0 text-xs">
+                    {searchResults.length}
+                  </Badge>
+                )}
               </div>
 
-              <ScrollArea className="flex-1 px-6 py-4">
-                <div className="space-y-4">
-                  {mockRetrievedChunks.map((chunk) => (
-                    <Card key={chunk.id} className="p-4 hover:shadow-md transition-shadow border-slate-200 dark:border-slate-800" data-testid={`chunk-${chunk.id}`}>
-                      <div className="space-y-3">
-                        <div className="flex items-start justify-between">
-                          <Badge className="bg-cyan-100 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-400">
-                            #{chunk.rank}
-                          </Badge>
-                          <span className="text-xs font-semibold text-green-600 dark:text-green-400">
-                            {chunk.similarity}%
-                          </span>
-                        </div>
-                        <div>
-                          <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Source</p>
-                          <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                            {chunk.document}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Preview</p>
-                          <p className="text-xs text-slate-600 dark:text-slate-300 line-clamp-3 leading-relaxed">
-                            {chunk.content}
-                          </p>
-                        </div>
-                        <Button variant="ghost" size="sm" className="w-full text-xs" data-testid={`expand-chunk-${chunk.id}`}>
-                          View Full Chunk
-                          <ChevronRight className="w-3 h-3 ml-1" />
-                        </Button>
-                      </div>
-                    </Card>
-                  ))}
+              <ScrollArea className="flex-1 px-4 py-4">
+                <div className="space-y-3">
+                  {searchResults.length === 0 && !isLoading && (
+                    <div className="flex flex-col items-center justify-center py-12 text-center">
+                      <FileText className="w-8 h-8 text-slate-300 dark:text-slate-600 mb-3" strokeWidth={1} />
+                      <p className="text-xs text-slate-400 dark:text-slate-500">
+                        Results will appear here after you search
+                      </p>
+                    </div>
+                  )}
+                  {isLoading && (
+                    <div className="flex flex-col items-center justify-center py-12 gap-3">
+                      <Loader2 className="w-6 h-6 text-cyan-500 animate-spin" />
+                      <p className="text-xs text-slate-400">Searching…</p>
+                    </div>
+                  )}
+                  <AnimatePresence>
+                    {searchResults.map((result, idx) => (
+                      <motion.div
+                        key={result.document_id}
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: idx * 0.05 }}
+                      >
+                        <ResultCard
+                          result={result}
+                          rank={idx + 1}
+                          token={getAccessToken()}
+                          onPreview={handlePreviewClick}
+                        />
+                      </motion.div>
+                    ))}
+                  </AnimatePresence>
                 </div>
               </ScrollArea>
             </div>
@@ -275,16 +476,23 @@ const QueryInterface = () => {
         )}
       </AnimatePresence>
 
-      {/* Toggle Right Panel Button */}
-      <Button
-        onClick={() => setShowRightPanel(!showRightPanel)}
-        variant="ghost"
-        size="icon"
-        className="absolute right-4 top-4 rounded-full bg-white dark:bg-slate-800 shadow-lg hover:shadow-xl"
+      {/* ── Toggle Right Panel ────────────────────────────────────────────────── */}
+      <button
+        onClick={() => setShowRightPanel((p) => !p)}
+        className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-0
+                   w-6 h-12 flex items-center justify-center
+                   bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700
+                   rounded-l-lg shadow-md hover:shadow-lg text-slate-500 dark:text-slate-400
+                   transition-all z-10"
         data-testid="toggle-right-panel"
+        style={{ right: showRightPanel ? '340px' : '0px' }}
       >
-        {showRightPanel ? <ChevronRight className="w-5 h-5" /> : <ChevronLeft className="w-5 h-5" />}
-      </Button>
+        {showRightPanel
+          ? <ChevronRight className="w-3 h-3" />
+          : <ChevronLeft className="w-3 h-3" />
+        }
+      </button>
+
     </div>
   );
 };
