@@ -1,4 +1,4 @@
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Brain,
   LayoutDashboard,
@@ -18,7 +18,17 @@ import { toast } from 'sonner';
 
 const Sidebar = () => {
   const location = useLocation();
+  const navigate = useNavigate();
   const { user, signOut } = useAuth();
+
+  const handleNewQuery = () => {
+    // Clear the active chat session so QueryInterface starts fresh
+    sessionStorage.removeItem('qi_messages');
+    sessionStorage.removeItem('qi_results');
+    sessionStorage.removeItem('qi_query');
+    sessionStorage.removeItem('qi_session_id'); // force new session ID on next query
+    navigate('/query');
+  };
 
   const navItems = [
     { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
@@ -69,12 +79,14 @@ const Sidebar = () => {
 
       {/* New Query Button */}
       <div className="px-6 mb-6">
-        <Link to="/query" data-testid="new-query-button">
-          <Button className="w-full bg-gradient-to-r from-slate-900 to-slate-800 hover:from-slate-800 hover:to-slate-700 text-white dark:from-slate-100 dark:to-slate-200 dark:text-slate-900 dark:hover:from-slate-200 dark:hover:to-slate-300 shadow-sm rounded-lg h-11 font-semibold transition-all duration-200">
-            <PlusCircle className="w-5 h-5 mr-2" strokeWidth={2} />
-            New Query
-          </Button>
-        </Link>
+        <Button
+          onClick={handleNewQuery}
+          data-testid="new-query-button"
+          className="w-full bg-gradient-to-r from-slate-900 to-slate-800 hover:from-slate-800 hover:to-slate-700 text-white dark:from-slate-100 dark:to-slate-200 dark:text-slate-900 dark:hover:from-slate-200 dark:hover:to-slate-300 shadow-sm rounded-lg h-11 font-semibold transition-all duration-200"
+        >
+          <PlusCircle className="w-5 h-5 mr-2" strokeWidth={2} />
+          New Query
+        </Button>
       </div>
 
       {/* Navigation */}

@@ -205,8 +205,13 @@ const MyCollections = () => {
           <Button
             className="bg-gradient-to-r from-slate-900 to-slate-800 hover:from-slate-800 hover:to-slate-700 text-white"
             data-testid="new-collection-button"
+            onClick={fetchCollections}
+            disabled={loading}
           >
-            <FolderOpen className="w-4 h-4 mr-2" />
+            {loading
+              ? <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              : <FolderOpen className="w-4 h-4 mr-2" />
+            }
             Refresh
           </Button>
         </div>

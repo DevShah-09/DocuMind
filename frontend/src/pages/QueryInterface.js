@@ -64,8 +64,8 @@ function ResultCard({ result, rank, token, onPreview }) {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 
   return (
-    <Card className={`p-4 border transition-all hover:shadow-md ${scoreBg(result.score)}`}>
-      <div className="space-y-3">
+    <Card className={`p-4 border transition-all hover:shadow-md overflow-hidden ${scoreBg(result.score)}`}>
+      <div className="space-y-3 min-w-0">
         {/* Header row */}
         <div className="flex items-start justify-between gap-2">
           <Badge className="bg-cyan-100 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-400 border-0 text-xs">
@@ -77,9 +77,9 @@ function ResultCard({ result, rank, token, onPreview }) {
         </div>
 
         {/* Filename */}
-        <div>
+        <div className="min-w-0">
           <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-0.5">Document</p>
-          <p className="text-sm font-semibold text-slate-900 dark:text-white leading-tight line-clamp-2">
+          <p className="text-sm font-semibold text-slate-900 dark:text-white leading-tight break-all line-clamp-2">
             {result.filename}
           </p>
         </div>
@@ -102,9 +102,9 @@ function ResultCard({ result, rank, token, onPreview }) {
 
         {/* Summary */}
         {result.summary && (
-          <div>
+          <div className="min-w-0">
             <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-0.5">Summary</p>
-            <p className="text-xs text-slate-600 dark:text-slate-300 line-clamp-3 leading-relaxed">
+            <p className="text-xs text-slate-600 dark:text-slate-300 line-clamp-3 leading-relaxed break-words">
               {result.summary}
             </p>
           </div>
@@ -112,9 +112,9 @@ function ResultCard({ result, rank, token, onPreview }) {
 
         {/* Best chunk preview */}
         {result.matched_chunks?.[0]?.text && (
-          <div>
+          <div className="min-w-0">
             <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-0.5">Matched text</p>
-            <p className="text-xs text-slate-600 dark:text-slate-300 line-clamp-2 leading-relaxed italic">
+            <p className="text-xs text-slate-600 dark:text-slate-300 line-clamp-2 leading-relaxed italic break-words">
               "…{result.matched_chunks[0].text.slice(0, 180)}…"
             </p>
           </div>
@@ -140,17 +140,51 @@ const QueryInterface = () => {
   const { getAccessToken } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   
-  const [query, setQuery] = useState(searchParams.get('q') || '');
-  const [messages, setMessages] = useState([]);
-  const [searchResults, setSearchResults] = useState([]);
+  // Persist chat state across browser refreshes using sessionStorage
+  const [query, setQuery] = useState(() => {
+    return sessionStorage.getItem('qi_query') || searchParams.get('q') || '';
+  });
+  const [messages, setMessages] = useState(() => {
+    try { return JSON.parse(sessionStorage.getItem('qi_messages') || '[]'); }
+    catch { return []; }
+  });
+  const [searchResults, setSearchResults] = useState(() => {
+    try { return JSON.parse(sessionStorage.getItem('qi_results') || '[]'); }
+    catch { return []; }
+  });
   const [showRightPanel, setShowRightPanel] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef(null);
 
-  // Auto-scroll to latest message
+  // Mirror of messages state — updated synchronously so history saves are accurate
+  const messagesRef = useRef(
+    (() => { try { return JSON.parse(sessionStorage.getItem('qi_messages') || '[]'); } catch { return []; } })()
+  );
+
+  // Session ID — one per chat session, cleared by "New Query"
+  const sessionIdRef = useRef(
+    sessionStorage.getItem('qi_session_id') || (() => {
+      const id = `s_${Date.now()}`;
+      sessionStorage.setItem('qi_session_id', id);
+      return id;
+    })()
+  );
+
+  // Persist messages to sessionStorage whenever they change
   useEffect(() => {
+    sessionStorage.setItem('qi_messages', JSON.stringify(messages));
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Persist search results to sessionStorage
+  useEffect(() => {
+    sessionStorage.setItem('qi_results', JSON.stringify(searchResults));
+  }, [searchResults]);
+
+  // Persist query input to sessionStorage
+  useEffect(() => {
+    sessionStorage.setItem('qi_query', query);
+  }, [query]);
 
   // Execute search if query param is present on mount
   const hasSearched = useRef(false);
@@ -195,15 +229,15 @@ const QueryInterface = () => {
     const token = getAccessToken();
     if (!token) return;
 
-    // Add user message
-    setMessages((prev) => [
-      ...prev,
-      { id: Date.now(), type: 'user', content: q, timestamp: new Date().toLocaleTimeString() },
-    ]);
-    
+    // Build user message and update ref + state synchronously
+    const userMessage = { id: Date.now(), type: 'user', content: q, timestamp: new Date().toLocaleTimeString() };
+    const messagesWithUser = [...messagesRef.current, userMessage];
+    messagesRef.current = messagesWithUser;
+    setMessages(messagesWithUser);
+
     // Persist query in URL params
     setSearchParams({ q });
-    
+
     setQuery('');
     setIsLoading(true);
     setSearchResults([]);
@@ -212,6 +246,8 @@ const QueryInterface = () => {
       const data = await hybridSearch(q, token);
       const results = data.results || [];
       setSearchResults(results);
+
+      // ── Save to query history will happen after AI message is built ────────
 
       // Build AI response message
       const topResult = results[0];
@@ -226,28 +262,50 @@ const QueryInterface = () => {
           + (topResult.summary ? `\n\n${topResult.summary}` : '');
       }
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now() + 1,
-          type: 'ai',
-          content: aiContent,
-          resultCount: results.length,
-          parsedQuery: data.parsed_query,
-          latency: data.latency_ms,
-          timestamp: new Date().toLocaleTimeString(),
-        },
-      ]);
+      const aiMessage = {
+        id: Date.now() + 1,
+        type: 'ai',
+        content: aiContent,
+        resultCount: results.length,
+        parsedQuery: data.parsed_query,
+        latency: data.latency_ms,
+        timestamp: new Date().toLocaleTimeString(),
+      };
+
+      // Compute final messages using ref (avoids StrictMode double-invoke)
+      const finalMessages = [...messagesRef.current, aiMessage];
+      messagesRef.current = finalMessages;
+      setMessages(finalMessages);
+
+      // ── Upsert session entry in localStorage history ────────────────────────
+      // One history entry per session — updated each time a query is sent
+      const sessionId = sessionIdRef.current;
+      const historyEntry = {
+        id: sessionId,
+        query: q,                          // latest query text
+        timestamp: new Date().toISOString(),
+        resultCount: results.length,
+        topFile: results[0]?.filename || null,
+        snapshot: { messages: finalMessages, results },
+      };
+      try {
+        const existing = JSON.parse(localStorage.getItem('qi_history') || '[]');
+        // Replace existing entry for this session, or prepend
+        const filtered = existing.filter((e) => e.id !== sessionId);
+        localStorage.setItem('qi_history', JSON.stringify([historyEntry, ...filtered].slice(0, 200)));
+      } catch { /* ignore storage errors */ }
+      // ────────────────────────────────────────────────────────────────────────
+
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now() + 1,
-          type: 'error',
-          content: err.message || 'Search failed. Please try again.',
-          timestamp: new Date().toLocaleTimeString(),
-        },
-      ]);
+      const errMessage = {
+        id: Date.now() + 1,
+        type: 'error',
+        content: err.message || 'Search failed. Please try again.',
+        timestamp: new Date().toLocaleTimeString(),
+      };
+      const finalMessages = [...messagesRef.current, errMessage];
+      messagesRef.current = finalMessages;
+      setMessages(finalMessages);
     } finally {
       setIsLoading(false);
     }
@@ -436,8 +494,8 @@ const QueryInterface = () => {
                 )}
               </div>
 
-              <ScrollArea className="flex-1 px-4 py-4">
-                <div className="space-y-3">
+              <ScrollArea className="flex-1 px-4 py-4 overflow-x-hidden">
+                <div className="space-y-3 w-full">
                   {searchResults.length === 0 && !isLoading && (
                     <div className="flex flex-col items-center justify-center py-12 text-center">
                       <FileText className="w-8 h-8 text-slate-300 dark:text-slate-600 mb-3" strokeWidth={1} />
