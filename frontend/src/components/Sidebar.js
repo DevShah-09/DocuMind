@@ -1,7 +1,6 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Brain,
-  LayoutDashboard,
   Upload,
   FolderOpen,
   History,
@@ -31,7 +30,6 @@ const Sidebar = () => {
   };
 
   const navItems = [
-    { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
     { path: '/upload', icon: Upload, label: 'Upload Documents' },
     { path: '/collections', icon: FolderOpen, label: 'My Collections' },
     { path: '/history', icon: History, label: 'Query History' },
@@ -62,7 +60,7 @@ const Sidebar = () => {
     >
       {/* Logo */}
       <div className="px-6 py-8">
-        <Link to="/" className="flex items-center gap-3 group" data-testid="logo-link">
+        <Link to="/query" className="flex items-center gap-3 group" data-testid="logo-link">
           <div className="p-2 rounded-lg bg-gradient-to-br from-slate-900 to-slate-800 dark:from-slate-100 dark:to-slate-200 group-hover:scale-105 transition-transform duration-200">
             <Brain className="w-6 h-6 text-white dark:text-slate-900" strokeWidth={1.5} />
           </div>

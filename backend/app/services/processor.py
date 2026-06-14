@@ -26,10 +26,10 @@ class DocumentOrchestrator:
         # Metadata Generation
         file_hash = hashlib.sha256(file_content).hexdigest()
         
-        # Check for duplicates before processing
-        existing_doc = await self.vector_db.check_duplicate(file_hash)
+        # Check for duplicates before processing — scoped to THIS user only
+        existing_doc = await self.vector_db.check_duplicate(file_hash, user_id=user_id)
         if existing_doc:
-            print(f"[PROCESSOR] Duplicate detected: {original_name} already exists.")
+            print(f"[PROCESSOR] Duplicate detected: {original_name} already exists for user={user_id}.")
             raise ValueError("This file already exists in your collections.")
 
         doc_id = file_id  # Use the shared file_id from API

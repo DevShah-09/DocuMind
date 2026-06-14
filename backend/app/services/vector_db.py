@@ -29,7 +29,7 @@ class VectorDBService:
         return cls._instance
 
     def _ensure_collection_exists(self):
-        """Creates the Qdrant collection if it doesn't already exist."""
+        """Creates the Qdrant collection and payload indexes if they don't already exist."""
         existing = [c.name for c in self.client.get_collections().collections]
         if self.collection_name not in existing:
             self.client.create_collection(
@@ -37,6 +37,23 @@ class VectorDBService:
                 vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE),
             )
             print(f"[QDRANT] Created collection: '{self.collection_name}'")
+
+        # Ensure payload indexes exist (idempotent — safe to call on existing collections)
+        index_specs = [
+            ("user_id",   models.PayloadSchemaType.KEYWORD),
+            ("file_hash", models.PayloadSchemaType.KEYWORD),
+        ]
+        for field_name, schema_type in index_specs:
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field_name,
+                    field_schema=schema_type,
+                )
+                print(f"[QDRANT] Ensured payload index: {field_name}")
+            except Exception as e:
+                # Index may already exist — not an error
+                print(f"[QDRANT] Index '{field_name}' already exists or could not be created: {e}")
 
     async def index_document(self, doc_id: str, text: str, metadata: dict):
         """Encodes text and upserts the vector + payload into Qdrant."""
@@ -79,18 +96,29 @@ class VectorDBService:
         )
         return response.points
 
-    async def check_duplicate(self, file_hash: str):
-        """Checks if a document with the same file_hash already exists."""
+    async def check_duplicate(self, file_hash: str, user_id: str = None):
+        """Checks if a document with the same file_hash already exists FOR THIS USER.
+        
+        user_id is required to ensure cross-user isolation — the same file uploaded
+        by two different accounts must not be treated as a duplicate.
+        """
+        must_conditions = [
+            models.FieldCondition(
+                key="file_hash",
+                match=models.MatchValue(value=file_hash)
+            )
+        ]
+        # Scope the duplicate check to this specific user only
+        if user_id:
+            must_conditions.append(
+                models.FieldCondition(
+                    key="user_id",
+                    match=models.MatchValue(value=user_id)
+                )
+            )
         points, _ = self.client.scroll(
             collection_name=self.collection_name,
-            scroll_filter=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="file_hash",
-                        match=models.MatchValue(value=file_hash)
-                    )
-                ]
-            ),
+            scroll_filter=models.Filter(must=must_conditions),
             limit=1,
             with_payload=True
         )
