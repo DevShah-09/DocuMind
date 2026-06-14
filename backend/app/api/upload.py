@@ -114,8 +114,14 @@ async def delete_document(
         if file_key:
             orchestrator.storage.delete_file(file_key)
 
-        # 4. Delete point from Qdrant
+        # 4. Delete point from Qdrant (both legacy and chunk collections)
         orchestrator.vector_db.delete_document(doc_id)
+        try:
+            from app.vectorstore.qdrant_store import qdrant_store
+            await qdrant_store.delete_document_chunks(doc_id, user_id)
+            print(f"[API] Deleted chunks for document {doc_id}")
+        except Exception as e:
+            print(f"[API] Failed to delete chunks for document {doc_id}: {e}")
 
         return {"message": "Document deleted successfully", "doc_id": doc_id}
 

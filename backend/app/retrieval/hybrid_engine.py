@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import time
+import re
 from typing import Any, Dict, List, Optional
 
 from app.embeddings.embedding_service import embedding_service
@@ -31,6 +32,87 @@ _ranker = Ranker()
 
 # Candidate pool — fetch more than needed before ranking
 CANDIDATE_POOL = 50
+
+# Month names mapping for normalization
+MONTH_MAP = {
+    "jan": "January", "feb": "February", "mar": "March", "apr": "April",
+    "may": "May", "jun": "June", "jul": "July", "aug": "August",
+    "sep": "September", "oct": "October", "nov": "November", "dec": "December",
+    "january": "January", "february": "February", "march": "March",
+    "april": "April", "june": "June", "july": "July", "august": "August",
+    "september": "September", "october": "October", "november": "November",
+    "december": "December",
+}
+
+_MONTH_RE = re.compile(
+    r"\b(january|february|march|april|may|june|july|august|september"
+    r"|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b",
+    re.IGNORECASE,
+)
+
+def _extract_year_from_payload(p: dict) -> Optional[int]:
+    # 1. Direct checks
+    for key in ("year", "Year"):
+        val = p.get(key) or p.get("metadata", {}).get(key)
+        if val is not None:
+            try:
+                y = int(val)
+                if 1950 <= y <= 2099:
+                    return y
+            except (TypeError, ValueError):
+                pass
+
+    # 2. Check metadata dictionary values
+    metadata = p.get("metadata", {})
+    for k, v in metadata.items():
+        if isinstance(v, (str, int)):
+            m = re.search(r"\b(19[5-9]\d|20[0-4]\d)\b", str(v))
+            if m:
+                return int(m.group(1))
+
+    # 3. Check filename, summary, and text
+    text_to_search = f"{p.get('original_name', '')} {p.get('summary', '')} {p.get('text_content', '')}"
+    m = re.search(r"\b(19[5-9]\d|20[0-4]\d)\b", text_to_search)
+    if m:
+        return int(m.group(1))
+        
+    return None
+
+def _extract_month_from_payload(p: dict) -> Optional[str]:
+    # 1. Direct checks
+    for key in ("month", "Month"):
+        val = p.get(key) or p.get("metadata", {}).get(key)
+        if isinstance(val, str):
+            m_normalized = MONTH_MAP.get(val.lower().strip())
+            if m_normalized:
+                return m_normalized
+
+    # 2. Check metadata dictionary values
+    metadata = p.get("metadata", {})
+    for k, v in metadata.items():
+        if isinstance(v, str):
+            m = _MONTH_RE.search(v)
+            if m:
+                m_normalized = MONTH_MAP.get(m.group(1).lower())
+                if m_normalized:
+                    return m_normalized
+
+    # 3. Check filename, summary, and text
+    text_to_search = f"{p.get('original_name', '')} {p.get('summary', '')} {p.get('text_content', '')}"
+    m = _MONTH_RE.search(text_to_search)
+    if m:
+        m_normalized = MONTH_MAP.get(m.group(1).lower())
+        if m_normalized:
+            return m_normalized
+
+    return None
+
+def _extract_date_from_payload(p: dict) -> Optional[str]:
+    for key in ("date", "Date", "bill_date", "statement_date"):
+        val = p.get(key) or p.get("metadata", {}).get(key)
+        if val is not None:
+            return str(val)
+    return None
 
 
 class HybridRetrievalEngine:
@@ -146,6 +228,18 @@ class HybridRetrievalEngine:
                 p = hit.payload or {}
                 doc_id = hit.id
                 
+                doc_year = _extract_year_from_payload(p)
+                doc_month = _extract_month_from_payload(p)
+                doc_type = p.get("category", "document")
+                
+                # Apply hard filtering on extracted fields for legacy fallback
+                if parsed.year is not None and doc_year is not None and doc_year != parsed.year:
+                    continue
+                if parsed.month is not None and doc_month is not None and doc_month.lower() != parsed.month.lower():
+                    continue
+                if parsed.document_type and doc_type and doc_type.lower() != parsed.document_type.lower():
+                    continue
+                
                 # We create a dummy CandidateChunk for the Ranker and Preview URL generation to use
                 chunk = CandidateChunk(
                     chunk_id=f"{doc_id}_legacy",
@@ -160,11 +254,11 @@ class HybridRetrievalEngine:
                 doc = CandidateDocument(
                     document_id=str(doc_id),
                     filename=p.get("original_name", "Unknown Document"),
-                    document_type=p.get("category", "document"),
+                    document_type=doc_type,
                     summary=p.get("summary", ""),
-                    date=None,
-                    year=None,
-                    month=None,
+                    date=_extract_date_from_payload(p),
+                    year=doc_year,
+                    month=doc_month,
                     metadata=p.get("metadata", {}),
                     tags=[],
                     entities=[],
