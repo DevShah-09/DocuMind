@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Upload, FileText, File, CheckCircle2, Loader2,
@@ -173,15 +173,115 @@ const ResultCard = ({ result, onRemove }) => {
 
 // ── Main Component ───────────────────────────────────────────────────────────
 const UploadDocuments = () => {
-  const [dragActive, setDragActive]     = useState(false);
-  const [processing, setProcessing]     = useState(false);
-  const [stageIndex, setStageIndex]     = useState(0);
-  const [progress, setProgress]         = useState(0);
-  const [currentFile, setCurrentFile]   = useState('');
-  const [results, setResults]           = useState([]);
-  const [error, setError]               = useState(null);
-  const { getAccessToken } = useAuth();
-  const fileInputRef                    = useRef(null);
+  const [dragActive, setDragActive] = useState(false);
+  const [queue, setQueue]           = useState([]);
+  const { getAccessToken }          = useAuth();
+  const fileInputRef                = useRef(null);
+  const isProcessingRef             = useRef(false);
+
+  const isProcessing = queue.some(item => item.status === 'processing');
+
+  const processQueueItem = useCallback(async (itemToProcess) => {
+    isProcessingRef.current = true;
+
+    // Set status to processing
+    setQueue(prev => prev.map(item =>
+      item.id === itemToProcess.id ? { ...item, status: 'processing', stageIndex: 0, progress: 0 } : item
+    ));
+
+    // Simulated stage ticker
+    let currentStage = 0;
+    const ticker = setInterval(() => {
+      currentStage += 1;
+      if (currentStage >= STAGES.length - 1) {
+        clearInterval(ticker);
+      } else {
+        setQueue(prev => prev.map(item =>
+          item.id === itemToProcess.id
+            ? {
+                ...item,
+                stageIndex: currentStage,
+                progress: Math.min(90, Math.round((currentStage / (STAGES.length - 1)) * 90))
+              }
+            : item
+        ));
+      }
+    }, 2200);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', itemToProcess.file);
+
+      const token = getAccessToken();
+      const response = await fetch('http://localhost:8000/documents/upload', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
+        body: formData,
+      });
+
+      clearInterval(ticker);
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+        throw new Error(errData.detail || `Server error: ${response.status}`);
+      }
+
+      const json = await response.json();
+      const data = json.data;
+
+      // Update item status to done with the result
+      setQueue(prev => prev.map(item =>
+        item.id === itemToProcess.id
+          ? {
+              ...item,
+              status: 'done',
+              stageIndex: STAGES.length - 1,
+              progress: 100,
+              result: {
+                id: data.id,
+                original_name: data.original_name,
+                category: data.category,
+                confidence: data.confidence,
+                summary: data.summary,
+                metadata: data.metadata || {},
+              }
+            }
+          : item
+      ));
+
+      toast.success(`"${itemToProcess.name}" categorized as "${getCategoryMeta(data.category).label}"!`);
+    } catch (err) {
+      clearInterval(ticker);
+      console.error(err);
+      const msg = err.message.includes('fetch')
+        ? 'Cannot reach backend. Is the server running on port 8000?'
+        : err.message;
+
+      setQueue(prev => prev.map(item =>
+        item.id === itemToProcess.id
+          ? { ...item, status: 'error', error: msg }
+          : item
+      ));
+      toast.error(`Failed to upload "${itemToProcess.name}": ${msg}`);
+    } finally {
+      // Small pause so user sees 100%
+      await new Promise(resolve => setTimeout(resolve, 800));
+      isProcessingRef.current = false;
+      // Trigger next check in useEffect
+      setQueue(prev => [...prev]);
+    }
+  }, [getAccessToken]);
+
+  // Sequential processing loop
+  useEffect(() => {
+    if (isProcessingRef.current) return;
+    const pendingItem = queue.find(item => item.status === 'pending');
+    if (pendingItem) {
+      processQueueItem(pendingItem);
+    }
+  }, [queue, processQueueItem]);
 
   // ── Drag handlers ──────────────────────────────────────────────────────────
   const handleDrag = (e) => {
@@ -210,103 +310,38 @@ const UploadDocuments = () => {
     return null;
   };
 
-  // ── Simulated stage ticker ─────────────────────────────────────────────────
-  const runStageTicker = () => {
-    let s = 0;
-    setStageIndex(0);
-    setProgress(0);
+  // ── File list handler ──────────────────────────────────────────────────────
+  const handleFiles = (fileList) => {
+    const newItems = Array.from(fileList).map(file => {
+      const id = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const validationError = validateFile(file);
+      return {
+        id,
+        file,
+        name: file.name,
+        size: file.size,
+        status: validationError ? 'error' : 'pending',
+        stageIndex: 0,
+        progress: 0,
+        result: null,
+        error: validationError,
+      };
+    });
 
-    // Each stage takes roughly equal share of the 0-90% range before real response
-    const stageInterval = setInterval(() => {
-      s += 1;
-      if (s >= STAGES.length - 1) {
-        clearInterval(stageInterval);
-      } else {
-        setStageIndex(s);
-      }
-      setProgress(Math.min(90, Math.round((s / (STAGES.length - 1)) * 90)));
-    }, 2200); // advance every 2.2s
-
-    return stageInterval;
+    setQueue(prev => [...prev, ...newItems]);
   };
 
-  // ── Main upload function ───────────────────────────────────────────────────
-  const handleFiles = async (files) => {
-    const file = files[0]; // process one at a time
-    const validationError = validateFile(file);
-    if (validationError) {
-      setError(validationError);
-      toast.error(validationError);
-      return;
-    }
-
-    setError(null);
-    setProcessing(true);
-    setCurrentFile(file.name);
-
-    const ticker = runStageTicker();
-
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-
-      const token = getAccessToken();
-      const response = await fetch('http://localhost:8000/documents/upload', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        },
-        body: formData,
-      });
-
-      clearInterval(ticker);
-
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({ detail: 'Unknown error' }));
-        throw new Error(errData.detail || `Server error: ${response.status}`);
-      }
-
-      const json = await response.json();
-      const data = json.data;
-
-      // Final stage + 100%
-      setStageIndex(STAGES.length - 1);
-      setProgress(100);
-
-      setResults((prev) => [
-        {
-          id: data.id,
-          original_name: data.original_name,
-          category: data.category,
-          confidence: data.confidence,
-          summary: data.summary,
-          metadata: data.metadata || {},
-        },
-        ...prev,
-      ]);
-
-      toast.success(`Categorized as "${getCategoryMeta(data.category).label}"!`);
-    } catch (err) {
-      clearInterval(ticker);
-      console.error(err);
-      const msg = err.message.includes('fetch')
-        ? 'Cannot reach backend. Is the server running on port 8000?'
-        : err.message;
-      setError(msg);
-      toast.error(msg);
-    } finally {
-      // Small pause so user sees 100%
-      setTimeout(() => {
-        setProcessing(false);
-        setProgress(0);
-        setStageIndex(0);
-        setCurrentFile('');
-        if (fileInputRef.current) fileInputRef.current.value = '';
-      }, 800);
+  const handleFileInputChange = (e) => {
+    if (e.target.files?.length) {
+      handleFiles(e.target.files);
+      e.target.value = ''; // Reset file input so that selecting same file fires onChange again
     }
   };
 
-  const removeResult = (id) => setResults((prev) => prev.filter((r) => r.id !== id));
+  const clearQueue = () => {
+    // Only clear non-processing items to avoid breaking the active fetch
+    setQueue(prev => prev.filter(item => item.status === 'processing'));
+  };
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -322,7 +357,7 @@ const UploadDocuments = () => {
             Upload Documents
           </h1>
           <p className="text-lg text-slate-500 dark:text-slate-400">
-            Drop a file — Qwen AI will read, categorize, and index it automatically.
+            Drop files — Qwen AI will read, categorize, and index them automatically.
           </p>
         </div>
 
@@ -332,7 +367,7 @@ const UploadDocuments = () => {
           <Card className={`border-2 border-dashed transition-all duration-200 ${
             dragActive
               ? 'border-cyan-500 bg-cyan-50 dark:bg-cyan-900/10 shadow-lg'
-              : processing
+              : isProcessing
               ? 'border-violet-400 bg-violet-50 dark:bg-violet-900/10'
               : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
           }`}>
@@ -347,102 +382,53 @@ const UploadDocuments = () => {
               >
                 {/* Icon */}
                 <div className={`p-6 rounded-2xl transition-colors ${
-                  processing ? 'bg-violet-100 dark:bg-violet-900/30' : 'bg-slate-100 dark:bg-slate-800'
+                  isProcessing ? 'bg-violet-100 dark:bg-violet-900/30' : 'bg-slate-100 dark:bg-slate-800'
                 }`}>
-                  {processing
+                  {isProcessing
                     ? <Loader2 className="w-12 h-12 text-violet-500 animate-spin" strokeWidth={1.5} />
                     : <Upload  className="w-12 h-12 text-cyan-500" strokeWidth={1.5} />
                   }
                 </div>
 
-                {processing ? (
-                  <div className="w-full max-w-sm space-y-4">
-                    <p className="text-base font-semibold text-slate-800 dark:text-white truncate">
-                      {currentFile}
-                    </p>
-                    {/* Stage label */}
-                    <div className="flex items-center justify-center gap-2 text-sm text-slate-500 dark:text-slate-400">
-                      <Loader2 className="w-4 h-4 animate-spin text-violet-500" />
-                      <span>{STAGES[stageIndex]?.label}</span>
-                    </div>
-                    {/* Progress bar */}
-                    <div className="space-y-1">
-                      <Progress value={progress} className="h-2" />
-                      <p className="text-xs text-slate-400 dark:text-slate-500 text-right">{progress}%</p>
-                    </div>
-                    {/* Stage dots */}
-                    <div className="flex items-center justify-center gap-2 pt-1">
-                      {STAGES.map((s, i) => (
-                        <div
-                          key={s.id}
-                          className={`h-1.5 rounded-full transition-all duration-500 ${
-                            i < stageIndex
-                              ? 'w-4 bg-violet-500'
-                              : i === stageIndex
-                              ? 'w-6 bg-violet-400'
-                              : 'w-1.5 bg-slate-300 dark:bg-slate-600'
-                          }`}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <div>
-                      <h3 className="text-xl font-semibold text-slate-900 dark:text-white mb-1">
-                        Drag &amp; drop your file here
-                      </h3>
-                      <p className="text-slate-500 dark:text-slate-400 text-sm">
-                        Supported: PDF, JPG, PNG — max {MAX_SIZE_MB}MB
-                      </p>
-                    </div>
+                <div>
+                  <h3 className="text-xl font-semibold text-slate-900 dark:text-white mb-1">
+                    {isProcessing ? 'Processing documents...' : 'Drag & drop files here'}
+                  </h3>
+                  <p className="text-slate-500 dark:text-slate-400 text-sm">
+                    {isProcessing
+                      ? `${queue.filter(q => q.status === 'pending' || q.status === 'processing').length} files remaining in queue`
+                      : `Supported: PDF, JPG, PNG — max ${MAX_SIZE_MB}MB`
+                    }
+                  </p>
+                </div>
 
-                    <div className="flex items-center gap-4">
-                      <Button
-                        onClick={() => fileInputRef.current?.click()}
-                        className="bg-gradient-to-r from-cyan-500 to-violet-600 hover:from-cyan-400 hover:to-violet-500 text-white shadow-md"
-                        data-testid="browse-files-button"
-                      >
-                        <FileText className="w-4 h-4 mr-2" />
-                        Browse Files
-                      </Button>
-                    </div>
+                <div className="flex items-center gap-4">
+                  <Button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="bg-gradient-to-r from-cyan-500 to-violet-600 hover:from-cyan-400 hover:to-violet-500 text-white shadow-md"
+                    data-testid="browse-files-button"
+                  >
+                    <FileText className="w-4 h-4 mr-2" />
+                    Browse Files
+                  </Button>
+                </div>
 
-                    <input
-                      ref={fileInputRef}
-                      id="file-input"
-                      type="file"
-                      className="hidden"
-                      accept=".pdf,.jpg,.jpeg,.png"
-                      onChange={(e) => e.target.files?.length && handleFiles(e.target.files)}
-                      data-testid="file-input"
-                    />
-                  </>
-                )}
+                <input
+                  ref={fileInputRef}
+                  id="file-input"
+                  type="file"
+                  className="hidden"
+                  accept=".pdf,.jpg,.jpeg,.png"
+                  multiple
+                  onChange={handleFileInputChange}
+                  data-testid="file-input"
+                />
               </div>
             </CardContent>
           </Card>
 
-          {/* Error Banner */}
-          <AnimatePresence>
-            {error && (
-              <motion.div
-                initial={{ opacity: 0, y: -8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                className="flex items-start gap-3 p-4 rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300"
-              >
-                <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
-                <span className="text-sm">{error}</span>
-                <button onClick={() => setError(null)} className="ml-auto flex-shrink-0">
-                  <X className="w-4 h-4" />
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
           {/* How it works */}
-          {results.length === 0 && !processing && (
+          {queue.length === 0 && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               {[
                 { icon: Upload,       label: 'Upload',    desc: 'PDF or image' },
@@ -461,34 +447,134 @@ const UploadDocuments = () => {
             </div>
           )}
 
-          {/* Results */}
-          <AnimatePresence>
-            {results.length > 0 && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="space-y-4"
-              >
-                <div className="flex items-center justify-between">
-                  <h3 className="text-lg font-semibold text-slate-900 dark:text-white">
-                    Processed ({results.length})
-                  </h3>
-                  <button
-                    onClick={() => setResults([])}
-                    className="text-xs text-slate-400 hover:text-red-500 transition-colors"
-                  >
-                    Clear all
-                  </button>
-                </div>
+          {/* Queue List */}
+          {queue.length > 0 && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-semibold text-slate-900 dark:text-white">
+                  Documents Queue ({queue.length})
+                </h3>
+                <button
+                  onClick={clearQueue}
+                  className="text-xs text-slate-400 hover:text-red-500 transition-colors"
+                >
+                  Clear completed / failed
+                </button>
+              </div>
 
-                <AnimatePresence>
-                  {results.map((r) => (
-                    <ResultCard key={r.id} result={r} onRemove={removeResult} />
-                  ))}
+              <div className="space-y-3">
+                <AnimatePresence initial={false}>
+                  {queue.map((item) => {
+                    if (item.status === 'done') {
+                      return (
+                        <ResultCard
+                          key={item.id}
+                          result={item.result}
+                          onRemove={() => {
+                            setQueue(prev => prev.filter(q => q.id !== item.id));
+                          }}
+                        />
+                      );
+                    }
+
+                    return (
+                      <motion.div
+                        key={item.id}
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.95 }}
+                        transition={{ duration: 0.2 }}
+                      >
+                        <Card className="border-slate-200 dark:border-slate-800 overflow-hidden">
+                          <CardContent className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                            <div className="flex items-center gap-3 min-w-0 flex-1">
+                              <div className={`p-2.5 rounded-xl flex-shrink-0 ${
+                                item.status === 'processing'
+                                  ? 'bg-violet-100 dark:bg-violet-900/20 text-violet-500'
+                                  : item.status === 'error'
+                                  ? 'bg-red-100 dark:bg-red-900/20 text-red-500'
+                                  : 'bg-slate-100 dark:bg-slate-800 text-slate-400'
+                              }`}>
+                                {item.status === 'processing' ? (
+                                  <Loader2 className="w-5 h-5 animate-spin" />
+                                ) : item.status === 'error' ? (
+                                  <AlertCircle className="w-5 h-5" />
+                                ) : (
+                                  <File className="w-5 h-5" />
+                                )}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <p className="font-medium text-sm text-slate-900 dark:text-white truncate">
+                                  {item.name}
+                                </p>
+                                <p className="text-xs text-slate-400 dark:text-slate-500">
+                                  {(item.size / 1024 / 1024).toFixed(2)} MB
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* Details based on status */}
+                            <div className="flex flex-col md:items-end gap-2 flex-shrink-0 min-w-[240px]">
+                              {item.status === 'pending' && (
+                                <span className="text-xs font-medium px-2 py-1 rounded bg-slate-100 dark:bg-slate-800 text-slate-500">
+                                  Waiting in queue
+                                </span>
+                              )}
+
+                              {item.status === 'processing' && (
+                                <div className="w-full space-y-2">
+                                  {/* Stage label and progress */}
+                                  <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+                                    <span className="truncate">{STAGES[item.stageIndex]?.label}</span>
+                                    <span>{item.progress}%</span>
+                                  </div>
+                                  <Progress value={item.progress} className="h-1.5 w-full" />
+                                  {/* Stage dots */}
+                                  <div className="flex items-center justify-start md:justify-end gap-1.5 pt-0.5">
+                                    {STAGES.map((s, idx) => (
+                                      <div
+                                        key={s.id}
+                                        className={`h-1 rounded-full transition-all duration-300 ${
+                                          idx < item.stageIndex
+                                            ? 'w-3 bg-violet-500'
+                                            : idx === item.stageIndex
+                                            ? 'w-4 bg-violet-400'
+                                            : 'w-1 bg-slate-200 dark:bg-slate-700'
+                                        }`}
+                                      />
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {item.status === 'error' && (
+                                <div className="flex items-center gap-2 text-xs text-red-500 max-w-[300px]">
+                                  <span className="truncate" title={item.error}>{item.error}</span>
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Action buttons (dismiss) */}
+                            <div className="flex items-center justify-end flex-shrink-0">
+                              {item.status !== 'processing' && (
+                                <button
+                                  onClick={() => setQueue(prev => prev.filter(q => q.id !== item.id))}
+                                  className="p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
+                                  title="Remove from queue"
+                                >
+                                  <X className="w-4 h-4" />
+                                </button>
+                              )}
+                            </div>
+                          </CardContent>
+                        </Card>
+                      </motion.div>
+                    );
+                  })}
                 </AnimatePresence>
-              </motion.div>
-            )}
-          </AnimatePresence>
+              </div>
+            </div>
+          )}
 
         </div>
       </motion.div>
