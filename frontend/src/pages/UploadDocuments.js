@@ -33,8 +33,13 @@ const CATEGORY_META = {
   miscellaneous:     { label: 'Miscellaneous',      color: 'text-gray-500',    bg: 'bg-gray-100 dark:bg-gray-800' },
 };
 
-const getCategoryMeta = (category) =>
-  CATEGORY_META[category] || { label: category, color: 'text-gray-500', bg: 'bg-gray-100 dark:bg-gray-800' };
+const getCategoryMeta = (category) => {
+  if (CATEGORY_META[category]) return CATEGORY_META[category];
+  const prettyLabel = category
+    ? category.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+    : 'Document';
+  return { label: prettyLabel, color: 'text-slate-500', bg: 'bg-slate-100 dark:bg-slate-800' };
+};
 
 const STAGES = [
   { id: 'uploading',     label: 'Uploading file...' },

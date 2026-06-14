@@ -17,7 +17,9 @@ class VisionProcessor:
         If it is illegible, set 'is_blur' to true and provide a short explanation in 'blur_reason'.
         
         Step 2: Classification (if not blurry). 
-        Determine Document Category. Choose exactly one from: [electricity_bill, water_bill, gas_bill, mobile_bill, bank_statement, invoice, receipt, marksheet, certificate, aadhaar, pan_card, passport, insurance, medical_report, prescription, legal_document, tax_document, resume, miscellaneous].
+        Determine Document Category. If the document matches one of these predefined types, choose it: [electricity_bill, water_bill, gas_bill, mobile_bill, bank_statement, invoice, receipt, marksheet, certificate, aadhaar, pan_card, passport, insurance, medical_report, prescription, legal_document, tax_document, resume]. 
+        Otherwise, you must generate a new specific, descriptive, and content-focused category slug in snake_case (e.g., 'math_notes', 'programming_notes', 'academic_paper', 'rent_agreement', 'driver_license') that best represents the document type.
+        DO NOT use generic categories like 'miscellaneous', 'other', or 'document'. Always generate a descriptive label based on the specific content (e.g. for Chinese Remainder Theorem, use 'math_notes' or 'study_material').
         Confidence Score: Evaluate confidence from 0 to 100.
         Metadata: Dynamically extract structured relevant fields depending on the category.
         Summary: Generate a searchable summary of the document.

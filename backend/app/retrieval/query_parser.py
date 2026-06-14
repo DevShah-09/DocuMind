@@ -68,9 +68,7 @@ Schema:
   "semantic_query": "<clean search text>"
 }
 
-Slugs: electricity_bill, water_bill, gas_bill, mobile_bill, bank_statement,
-invoice, receipt, tax_document, aadhaar, pan_card, passport, insurance,
-medical_report, prescription, marksheet, certificate, resume, legal_document, miscellaneous
+The document_type should be a snake_case slug representing the type of document requested (e.g. 'electricity_bill', 'rent_agreement', 'salary_slip', 'driver_license'). If the query does not ask for a specific document type, set it to null.
 """
 
 
