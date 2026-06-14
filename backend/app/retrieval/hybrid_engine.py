@@ -115,6 +115,16 @@ def _extract_date_from_payload(p: dict) -> Optional[str]:
     return None
 
 
+def _is_conversational_query(q: str) -> bool:
+    clean = q.lower().strip().rstrip("?!.")
+    greetings = {
+        "hi", "hello", "hey", "greetings", "good morning", "good afternoon", 
+        "good evening", "yo", "sup", "hi there", "hello there", "help",
+        "how are you", "what can you do", "who are you", "test"
+    }
+    return clean in greetings
+
+
 class HybridRetrievalEngine:
     """
     Production hybrid retrieval engine combining:
@@ -142,6 +152,27 @@ class HybridRetrievalEngine:
             SearchResponse with ranked results.
         """
         t0 = time.monotonic()
+
+        # ── Step 0: Check if Query is conversational greeting ──────────────────
+        if _is_conversational_query(request.query):
+            parsed = ParsedQuery(
+                document_type=None,
+                year=None,
+                month=None,
+                entities=[],
+                amount_filters=None,
+                semantic_query="",
+                raw_query=request.query
+            )
+            return SearchResponse(
+                query=request.query,
+                parsed_query=parsed,
+                results=[],
+                total=0,
+                page=request.page,
+                limit=request.limit,
+                latency_ms=0.0
+            )
 
         # ── Step 1: Parse Query ────────────────────────────────────────────────
         parsed: ParsedQuery = await query_parser.parse(request.query)

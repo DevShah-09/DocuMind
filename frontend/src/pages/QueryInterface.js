@@ -156,6 +156,9 @@ const QueryInterface = () => {
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef(null);
 
+  // Keep track of the last searched query to avoid double submission on param updates
+  const lastSearchedQueryRef = useRef(sessionStorage.getItem('qi_last_searched_query') || '');
+
   // Mirror of messages state — updated synchronously so history saves are accurate
   const messagesRef = useRef(
     (() => { try { return JSON.parse(sessionStorage.getItem('qi_messages') || '[]'); } catch { return []; } })()
@@ -186,17 +189,19 @@ const QueryInterface = () => {
     sessionStorage.setItem('qi_query', query);
   }, [query]);
 
-  // Execute search if query param is present on mount
-  const hasSearched = useRef(false);
+  // Execute search if query param is present or updated (e.g. from history click)
   useEffect(() => {
     const q = searchParams.get('q');
-    if (q && !hasSearched.current) {
-      hasSearched.current = true;
-      const originalQuery = query;
+    if (q && q !== lastSearchedQueryRef.current) {
+      lastSearchedQueryRef.current = q;
+      sessionStorage.setItem('qi_last_searched_query', q);
       setQuery(q);
       // Wait for React to update the state, then execute search
       setTimeout(() => {
-        document.getElementById('send-button')?.click();
+        const sendBtn = document.getElementById('send-button');
+        if (sendBtn && !sendBtn.disabled) {
+          sendBtn.click();
+        }
       }, 100);
     }
   }, [searchParams]);
@@ -229,6 +234,10 @@ const QueryInterface = () => {
     const token = getAccessToken();
     if (!token) return;
 
+    // Update the last searched query ref and session storage to prevent overwrite loops
+    lastSearchedQueryRef.current = q;
+    sessionStorage.setItem('qi_last_searched_query', q);
+
     // Build user message and update ref + state synchronously
     const userMessage = { id: Date.now(), type: 'user', content: q, timestamp: new Date().toLocaleTimeString() };
     const messagesWithUser = [...messagesRef.current, userMessage];
@@ -252,7 +261,18 @@ const QueryInterface = () => {
       // Build AI response message
       const topResult = results[0];
       let aiContent;
-      if (results.length === 0) {
+
+      // Intercept conversational greetings and help queries
+      const cleanQuery = q.toLowerCase().replace(/[?!.]/g, '').trim();
+      const greetings = ['hi', 'hello', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening', 'yo', 'sup', 'hi there', 'hello there', 'help', 'how are you', 'what can you do', 'who are you', 'test'];
+
+      if (greetings.includes(cleanQuery)) {
+        if (cleanQuery === 'help' || cleanQuery === 'what can you do' || cleanQuery === 'who are you') {
+          aiContent = "I am your Document Intelligence assistant! You can upload documents (like PDFs, JPGs, or PNGs) and ask me questions about them.\n\nFor example, you can search:\n- \"Show my latest bank statement\"\n- \"Find electricity bill from 2024\"\n- \"Is there any medical report?\"\n\nHow can I help you today?";
+        } else {
+          aiContent = "Hello! I am your Document Intelligence assistant. You can upload documents and ask me to retrieve or analyze them. How can I help you today?";
+        }
+      } else if (results.length === 0) {
         aiContent = `No documents matched "${q}". Try a different query or upload more documents.`;
       } else {
         const topScore = Math.round(topResult.score * 100);
