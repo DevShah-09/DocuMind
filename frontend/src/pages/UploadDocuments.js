@@ -177,9 +177,8 @@ const ResultCard = ({ result, onRemove }) => {
 };
 
 // ── Main Component ───────────────────────────────────────────────────────────
-const UploadDocuments = () => {
+const UploadDocuments = ({ queue, setQueue }) => {
   const [dragActive, setDragActive] = useState(false);
-  const [queue, setQueue]           = useState([]);
   const { getAccessToken }          = useAuth();
   const fileInputRef                = useRef(null);
   const isProcessingRef             = useRef(false);
