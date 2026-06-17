@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { FolderOpen, FileText, MoreVertical, Trash2, Edit, Loader2 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
@@ -31,80 +31,23 @@ import {
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 
-const MyCollections = () => {
-  const [collections, setCollections] = useState([]);
-  const [loading, setLoading] = useState(true);
+const colorMap = {
+  blue:   'bg-blue-100 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400',
+  green:  'bg-green-100 dark:bg-green-900/20 text-green-600 dark:text-green-400',
+  purple: 'bg-purple-100 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400',
+  orange: 'bg-orange-100 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400',
+  pink:   'bg-pink-100 dark:bg-pink-900/20 text-pink-600 dark:text-pink-400',
+  cyan:   'bg-cyan-100 dark:bg-cyan-900/20 text-cyan-600 dark:text-cyan-400',
+};
+
+/**
+ * MyCollections — receives state from AppShell so collections
+ * persist across page navigations without re-fetching on every mount.
+ */
+const MyCollections = ({ collections, setCollections, collectionsLoading, fetchCollections }) => {
   const [selectedCollection, setSelectedCollection] = useState(null);
   const [docToDelete, setDocToDelete] = useState(null);
   const { getAccessToken } = useAuth();
-
-  // Map of available colors for dynamic categories
-  const colorOptions = ['blue', 'green', 'purple', 'orange', 'pink', 'cyan'];
-  
-  const colorMap = {
-    blue: 'bg-blue-100 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400',
-    green: 'bg-green-100 dark:bg-green-900/20 text-green-600 dark:text-green-400',
-    purple: 'bg-purple-100 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400',
-    orange: 'bg-orange-100 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400',
-    pink: 'bg-pink-100 dark:bg-pink-900/20 text-pink-600 dark:text-pink-400',
-    cyan: 'bg-cyan-100 dark:bg-cyan-900/20 text-cyan-600 dark:text-cyan-400',
-  };
-
-  const fetchCollections = async () => {
-    setLoading(true);
-    console.log("Fetching collections...");
-    try {
-      const token = getAccessToken();
-      if (!token) {
-        console.warn("No token available for fetchCollections");
-        setLoading(false);
-        return;
-      }
-
-      const response = await fetch('http://localhost:8000/collections/summary', {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        console.error("Fetch collections failed:", response.status, err);
-        toast.error("Failed to load collections");
-        setLoading(false);
-        return;
-      }
-
-      const data = await response.json();
-      console.log("Collections data received:", data);
-      
-      if (!Array.isArray(data)) {
-        console.error("Expected array for collections, got:", typeof data);
-        setCollections([]);
-        setLoading(false);
-        return;
-      }
-
-      const formattedData = data.map((item, index) => ({
-        id: index,
-        name: item.category_name,
-        documents: item.count,
-        docs: item.documents || [],
-        color: colorOptions[index % colorOptions.length],
-      }));
-
-      setCollections(formattedData);
-    } catch (error) {
-      console.error("Failed to fetch collections:", error);
-      toast.error("An error occurred while fetching collections");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchCollections();
-  }, []);
 
   const handleDeleteDocument = async () => {
     if (!docToDelete) return;
@@ -113,22 +56,29 @@ const MyCollections = () => {
       const token = getAccessToken();
       const response = await fetch(`http://localhost:8000/documents/${docToDelete.id}`, {
         method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
+        headers: { 'Authorization': `Bearer ${token}` }
       });
 
       if (response.ok) {
         toast.success('Document deleted successfully');
-        fetchCollections();
-        // Update selectedCollection locally to avoid close-reopen
+        // Optimistically update local state, then refresh from server
+        setCollections(prev =>
+          prev
+            .map(col => ({
+              ...col,
+              docs: col.docs.filter(d => d.id !== docToDelete.id),
+              documents: col.docs.filter(d => d.id !== docToDelete.id).length,
+            }))
+            .filter(col => col.documents > 0)
+        );
         if (selectedCollection) {
           setSelectedCollection(prev => ({
             ...prev,
             docs: prev.docs.filter(d => d.id !== docToDelete.id),
-            documents: prev.documents - 1
+            documents: prev.documents - 1,
           }));
         }
+        fetchCollections();
       } else {
         toast.error('Failed to delete document');
       }
@@ -141,49 +91,25 @@ const MyCollections = () => {
   };
 
   const handleViewDocument = async (doc) => {
-    console.log("Viewing document:", doc);
     try {
       const token = getAccessToken();
-      if (!token) {
-        toast.error("You are not logged in");
-        return;
-      }
+      if (!token) { toast.error("You are not logged in"); return; }
 
       const response = await fetch(`http://localhost:8000/documents/view/${doc.id}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
+        headers: { 'Authorization': `Bearer ${token}` }
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        console.error("Backend error:", errorData);
-        throw new Error('Failed to fetch decrypted document');
-      }
+      if (!response.ok) throw new Error('Failed to fetch decrypted document');
 
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
-      
-      // Open in a new tab
       const newWindow = window.open(url, '_blank');
-      if (!newWindow) {
-        toast.error("Popup blocked! Please allow popups for this site.");
-      }
-      
-      console.log("Document opened successfully");
+      if (!newWindow) toast.error("Popup blocked! Please allow popups for this site.");
     } catch (error) {
       console.error('View error:', error);
       toast.error('Failed to open document: ' + error.message);
     }
   };
-
-  if (loading) {
-    return (
-      <div className="flex h-screen items-center justify-center">
-        <Loader2 className="w-10 h-10 animate-spin text-slate-500" />
-      </div>
-    );
-  }
 
   return (
     <div className="px-8 py-12" data-testid="my-collections">
@@ -198,17 +124,21 @@ const MyCollections = () => {
             <h1 className="text-4xl md:text-5xl font-bold text-slate-900 dark:text-white tracking-tight mb-3">
               My Collections
             </h1>
-            <p className="text-lg text-slate-600 dark:text-slate-300">
+            <p className="text-lg text-slate-600 dark:text-slate-300 flex items-center gap-2">
               AI-categorized documents organized automatically
+              {/* Subtle background-refresh indicator */}
+              {collectionsLoading && collections.length > 0 && (
+                <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+              )}
             </p>
           </div>
           <Button
             className="bg-gradient-to-r from-slate-900 to-slate-800 hover:from-slate-800 hover:to-slate-700 text-white"
             data-testid="new-collection-button"
             onClick={fetchCollections}
-            disabled={loading}
+            disabled={collectionsLoading}
           >
-            {loading
+            {collectionsLoading
               ? <Loader2 className="w-4 h-4 mr-2 animate-spin" />
               : <FolderOpen className="w-4 h-4 mr-2" />
             }
@@ -216,14 +146,21 @@ const MyCollections = () => {
           </Button>
         </div>
 
+        {/* First-time loading spinner (no cached data yet) */}
+        {collectionsLoading && collections.length === 0 && (
+          <div className="flex items-center justify-center py-20">
+            <Loader2 className="w-10 h-10 animate-spin text-slate-400" />
+          </div>
+        )}
+
         {/* Empty State */}
-        {collections.length === 0 && (
+        {!collectionsLoading && collections.length === 0 && (
           <div className="text-center py-20 border-2 border-dashed border-slate-200 rounded-xl">
             <p className="text-slate-500">No documents processed yet. Upload your first document to see collections.</p>
           </div>
         )}
 
-        {/* Collections Grid */}
+        {/* Collections Grid — show immediately from cache */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {collections.map((collection, index) => (
             <motion.div
@@ -232,7 +169,7 @@ const MyCollections = () => {
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.3, delay: index * 0.05 }}
             >
-              <Card 
+              <Card
                 className="hover:shadow-lg transition-all duration-200 border-slate-200 dark:border-slate-800 group cursor-pointer"
                 onClick={() => setSelectedCollection(collection)}
               >
@@ -279,11 +216,11 @@ const MyCollections = () => {
                 {selectedCollection?.name}
               </DialogTitle>
             </DialogHeader>
-            
+
             <div className="flex-1 overflow-y-auto mt-4 pr-2">
               <div className="space-y-3">
                 {selectedCollection?.docs.map((doc) => (
-                  <div 
+                  <div
                     key={doc.id}
                     className="flex items-center justify-between p-4 rounded-xl border border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors group"
                   >
@@ -298,8 +235,8 @@ const MyCollections = () => {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <Button 
-                        variant="outline" 
+                      <Button
+                        variant="outline"
                         size="sm"
                         className="opacity-0 group-hover:opacity-100 transition-opacity"
                         onClick={() => handleViewDocument(doc)}
@@ -307,8 +244,8 @@ const MyCollections = () => {
                         <ExternalLink className="w-4 h-4 mr-2" />
                         Open PDF
                       </Button>
-                      <Button 
-                        variant="ghost" 
+                      <Button
+                        variant="ghost"
                         size="sm"
                         className="opacity-0 group-hover:opacity-100 transition-opacity text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
                         onClick={(e) => {
@@ -337,7 +274,7 @@ const MyCollections = () => {
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction 
+              <AlertDialogAction
                 onClick={handleDeleteDocument}
                 className="bg-red-600 hover:bg-red-700 text-white"
               >
