@@ -53,32 +53,47 @@ class DocumentOrchestrator:
         doc_id = file_id  # Use the shared file_id from API
         upload_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-        # Step 1: Pre-process file into Base64 images
+        # Step 1: Smart Hybrid Pre-processing (Digital Text Extraction vs Scanned Vision)
         images_base64 = []
+        extracted_text = ""
+
         if "pdf" in content_type.lower() or original_name.lower().endswith(".pdf"):
             try:
-                # Open PDF from memory
                 doc = fitz.open(stream=file_content, filetype="pdf")
-                # Limit to first 3 pages to reduce token usage and speed up
-                for page_num in range(min(3, len(doc))):
-                    page = doc.load_page(page_num)
-                    zoom = 2  # upscale for better OCR/Vision resolution
-                    mat = fitz.Matrix(zoom, zoom)
-                    pix = page.get_pixmap(matrix=mat)
-                    img_bytes = pix.tobytes("jpeg")
-                    images_base64.append(base64.b64encode(img_bytes).decode('utf-8'))
+                # Try extracting digital text directly from pages
+                full_text = []
+                for page in doc:
+                    t = page.get_text("text").strip()
+                    if t:
+                        full_text.append(t)
+                extracted_text = "\n\n".join(full_text).strip()
+
+                # If text is minimal (<50 words), treat as scanned PDF and render images
+                if len(extracted_text.split()) < 50:
+                    extracted_text = ""
+                    for page_num in range(min(3, len(doc))):
+                        page = doc.load_page(page_num)
+                        # Standard 150 DPI scaling (zoom=1.5) instead of 2.0 to keep payload small
+                        mat = fitz.Matrix(1.5, 1.5)
+                        pix = page.get_pixmap(matrix=mat)
+                        img_bytes = pix.tobytes("jpeg")
+                        images_base64.append(base64.b64encode(img_bytes).decode('utf-8'))
                 doc.close()
             except Exception as e:
-                print(f"PDF processing error: {e}")
+                print(f"[PROCESSOR] PDF processing error: {e}")
         else:
-            # Direct Image
+            # Direct Image upload
             images_base64.append(base64.b64encode(file_content).decode('utf-8'))
 
-        # Step 2: Analyze Document with Vision Model
-        if not images_base64:
-            raise ValueError("No extractable images found in the document.")
-            
-        analysis_json_str = await self.vision.analyze_document(images_base64)
+        # Step 2: Analyze Document (Fast Text Path vs Vision LLM Path)
+        if extracted_text:
+            print(f"[PROCESSOR] Fast path: Digital text PDF detected ({len(extracted_text.split())} words). Skipping Vision LLM!")
+            analysis_json_str = await self.vision.analyze_text_document(extracted_text, original_name)
+        elif images_base64:
+            print(f"[PROCESSOR] Scanned path: Calling Vision LLM (Qwen 72B) for {len(images_base64)} image(s)...")
+            analysis_json_str = await self.vision.analyze_document(images_base64)
+        else:
+            raise ValueError("No extractable content or images found in the document.")
         
         try:
             # Clean up potential markdown code block format from the LLM

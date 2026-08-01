@@ -153,7 +153,7 @@ class Ranker:
 
         # Keyword/entity boost across best chunks
         keyword_boost = 0.0
-        all_chunk_text = " ".join(c.text.lower() for c in doc.chunks)
+        all_chunk_text = f"{doc.filename.lower()} {doc.summary.lower()} " + " ".join(c.text.lower() for c in doc.chunks)
 
         for entity in pq.entities:
             if entity.lower() in all_chunk_text:
@@ -161,7 +161,7 @@ class Ranker:
 
         # Semantic query keyword hits
         query_words = [
-            w for w in re.split(r"\W+", pq.semantic_query.lower()) if len(w) > 3
+            w for w in re.split(r"\W+", pq.semantic_query.lower()) if len(w) > 2 and w not in {"give", "show", "find", "get", "the", "my"}
         ]
         for word in query_words:
             if word in all_chunk_text:
