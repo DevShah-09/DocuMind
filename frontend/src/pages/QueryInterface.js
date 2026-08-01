@@ -16,18 +16,18 @@ import { useSearchParams } from 'react-router-dom';
 const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 // ── API helper ─────────────────────────────────────────────────────────────────
-async function hybridSearch(query, token) {
-  const res = await fetch(`${API_BASE}/search`, {
+async function chatWithLLM(query, token) {
+  const res = await fetch(`${API_BASE}/chat`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ query, limit: 3, score_threshold: 0.15 }),
+    body: JSON.stringify({ query, limit: 5, score_threshold: 0.10 }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `Search failed (${res.status})`);
+    throw new Error(err.detail || `Chat failed (${res.status})`);
   }
   return res.json();
 }
@@ -251,70 +251,63 @@ const QueryInterface = () => {
     setIsLoading(true);
     setSearchResults([]);
 
+    // ── Greeting shortcut (no network round-trip needed) ─────────────────────
+    const cleanQuery = q.toLowerCase().replace(/[?!.]/g, '').trim();
+    const greetings = ['hi', 'hello', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening', 'yo', 'sup', 'hi there', 'hello there', 'help', 'how are you', 'what can you do', 'who are you', 'test'];
+    if (greetings.includes(cleanQuery)) {
+      const greetContent = (cleanQuery === 'help' || cleanQuery === 'what can you do' || cleanQuery === 'who are you')
+        ? "I am your Document Intelligence assistant! You can upload documents (PDFs, JPGs, PNGs) and ask me anything about them.\n\nFor example:\n- \"Summarize my Aadhaar card\"\n- \"What is my electricity bill amount for January 2024?\"\n- \"Find my latest bank statement\"\n\nHow can I help you today?"
+        : "Hello! I'm your Document Intelligence assistant powered by Qwen AI. Ask me anything about your uploaded documents!";
+      const greetMsg = { id: Date.now() + 1, type: 'ai', content: greetContent, resultCount: 0, parsedQuery: null, latency: null, timestamp: new Date().toLocaleTimeString() };
+      const finalMessages = [...messagesRef.current, greetMsg];
+      messagesRef.current = finalMessages;
+      setMessages(finalMessages);
+      setIsLoading(false);
+      return;
+    }
+
     try {
-      const data = await hybridSearch(q, token);
-      const results = data.results || [];
-      setSearchResults(results);
+      // Call POST /chat — the real RAG + LLM pipeline
+      const data = await chatWithLLM(q, token);
 
-      // ── Save to query history will happen after AI message is built ────────
+      // Sources from the RAG pipeline → right panel document cards
+      const sources = data.sources || [];
+      setSearchResults(sources);
 
-      // Build AI response message
-      const topResult = results[0];
-      let aiContent;
-
-      // Intercept conversational greetings and help queries
-      const cleanQuery = q.toLowerCase().replace(/[?!.]/g, '').trim();
-      const greetings = ['hi', 'hello', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening', 'yo', 'sup', 'hi there', 'hello there', 'help', 'how are you', 'what can you do', 'who are you', 'test'];
-
-      if (greetings.includes(cleanQuery)) {
-        if (cleanQuery === 'help' || cleanQuery === 'what can you do' || cleanQuery === 'who are you') {
-          aiContent = "I am your Document Intelligence assistant! You can upload documents (like PDFs, JPGs, or PNGs) and ask me questions about them.\n\nFor example, you can search:\n- \"Show my latest bank statement\"\n- \"Find electricity bill from 2024\"\n- \"Is there any medical report?\"\n\nHow can I help you today?";
-        } else {
-          aiContent = "Hello! I am your Document Intelligence assistant. You can upload documents and ask me to retrieve or analyze them. How can I help you today?";
-        }
-      } else if (results.length === 0) {
-        aiContent = `No documents matched "${q}". Try a different query or upload more documents.`;
-      } else {
-        const topScore = Math.round(topResult.score * 100);
-        const latency = data.latency_ms ? ` (${Math.round(data.latency_ms)}ms)` : '';
-        aiContent = `Found ${results.length} matching document${results.length > 1 ? 's' : ''} for "${q}"${latency}. `
-          + `Best match: **${topResult.filename}** with ${topScore}% relevance. `
-          + (topResult.summary ? `\n\n${topResult.summary}` : '');
-      }
+      // The LLM-generated answer goes directly into the chat bubble
+      const aiContent = data.answer || (sources.length === 0
+        ? `I couldn't find any relevant documents for "${q}". Try uploading more documents or rephrasing your query.`
+        : data.answer);
 
       const aiMessage = {
         id: Date.now() + 1,
         type: 'ai',
         content: aiContent,
-        resultCount: results.length,
+        resultCount: sources.length,
         parsedQuery: data.parsed_query,
         latency: data.latency_ms,
         timestamp: new Date().toLocaleTimeString(),
       };
 
-      // Compute final messages using ref (avoids StrictMode double-invoke)
       const finalMessages = [...messagesRef.current, aiMessage];
       messagesRef.current = finalMessages;
       setMessages(finalMessages);
 
-      // ── Upsert session entry in localStorage history ────────────────────────
-      // One history entry per session — updated each time a query is sent
+      // ── Upsert session entry in localStorage history ──────────────────────
       const sessionId = sessionIdRef.current;
       const historyEntry = {
         id: sessionId,
-        query: q,                          // latest query text
+        query: q,
         timestamp: new Date().toISOString(),
-        resultCount: results.length,
-        topFile: results[0]?.filename || null,
-        snapshot: { messages: finalMessages, results },
+        resultCount: sources.length,
+        topFile: sources[0]?.filename || null,
+        snapshot: { messages: finalMessages, results: sources },
       };
       try {
         const existing = JSON.parse(localStorage.getItem('qi_history') || '[]');
-        // Replace existing entry for this session, or prepend
         const filtered = existing.filter((e) => e.id !== sessionId);
         localStorage.setItem('qi_history', JSON.stringify([historyEntry, ...filtered].slice(0, 200)));
       } catch { /* ignore storage errors */ }
-      // ────────────────────────────────────────────────────────────────────────
 
     } catch (err) {
       const errMessage = {
@@ -446,7 +439,7 @@ const QueryInterface = () => {
                     className="flex items-center gap-3 text-slate-500 dark:text-slate-400"
                   >
                     <Loader2 className="w-4 h-4 animate-spin text-cyan-500" />
-                    <span className="text-sm">Searching your documents…</span>
+                    <span className="text-sm">Thinking… reading your documents</span>
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -505,7 +498,7 @@ const QueryInterface = () => {
               <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-900 dark:text-white flex items-center gap-2">
                   <FileText className="w-4 h-4 text-cyan-500" strokeWidth={1.5} />
-                  Retrieved Documents
+                  AI Sources
                 </h3>
                 {searchResults.length > 0 && (
                   <Badge className="bg-cyan-100 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-400 border-0 text-xs">

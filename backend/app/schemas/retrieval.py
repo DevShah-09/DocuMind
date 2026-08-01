@@ -155,3 +155,33 @@ class BatchSearchResponse(BaseModel):
     results: Dict[str, SearchResponse]
     total_queries: int
     latency_ms: float
+
+
+# ── Chat (RAG) ─────────────────────────────────────────────────────────────────
+
+class ChatRequest(BaseModel):
+    """Payload for POST /chat."""
+    query: str = Field(..., min_length=1, max_length=1000, description="Natural language query or instruction")
+    limit: int = Field(5, ge=1, le=20, description="Max source documents to retrieve")
+    score_threshold: float = Field(0.10, ge=0.0, le=1.0, description="Minimum similarity score for retrieval")
+
+
+class ChatSource(BaseModel):
+    """A single source document cited in the chat answer."""
+    document_id: str
+    filename: str
+    document_type: str
+    summary: str
+    score: float
+    year: Optional[int] = None
+    month: Optional[str] = None
+    preview_url: str = ""
+
+
+class ChatResponse(BaseModel):
+    """Full response for POST /chat."""
+    answer: str
+    sources: List[ChatSource] = Field(default_factory=list)
+    parsed_query: Optional[ParsedQuery] = None
+    latency_ms: float
+
