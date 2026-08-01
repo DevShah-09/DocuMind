@@ -9,6 +9,52 @@ class VisionProcessor:
             api_key=settings.OPENROUTER_API_KEY,
         )
 
+    async def analyze_text_document(self, extracted_text: str, document_name: str):
+        prompt = f"""
+        Analyze the following document text extracted from '{document_name}'.
+        
+        Step 1: Classification.
+        Determine Document Category. If the document matches one of these predefined types, choose it: [electricity_bill, water_bill, gas_bill, mobile_bill, bank_statement, invoice, receipt, marksheet, certificate, aadhaar, pan_card, passport, insurance, medical_report, prescription, legal_document, tax_document, resume]. 
+        Otherwise, generate a specific, descriptive category slug in snake_case (e.g., 'math_notes', 'programming_notes', 'academic_paper', 'rent_agreement', 'driver_license').
+        DO NOT use generic categories like 'miscellaneous', 'other', or 'document'.
+        Confidence Score: Evaluate confidence from 80 to 100.
+        Metadata: Dynamically extract structured relevant fields (dates, amounts, reference numbers, names) into a dictionary.
+        Summary: Generate a concise, searchable summary of the document.
+        
+        Return your response strictly as JSON with exactly these keys:
+        'is_blur' (false), 'blur_reason' (null), 'category' (string), 'confidence' (integer), 'metadata' (dictionary), 'summary' (string), 'text' (string).
+        """
+
+        try:
+            # Use fast text-only Qwen 7B or 72B text model
+            response = self.client.chat.completions.create(
+                model="qwen/qwen-2.5-7b-instruct",
+                messages=[
+                    {"role": "system", "content": "You are a document extraction assistant. Respond ONLY with valid JSON."},
+                    {"role": "user", "content": f"{prompt}\n\nDOCUMENT TEXT:\n{extracted_text[:6000]}"}
+                ],
+                response_format={"type": "json_object"},
+                max_tokens=1500,
+                temperature=0.0,
+            )
+            result_str = response.choices[0].message.content
+            # Ensure text field contains full extracted text
+            import json
+            data = json.loads(result_str)
+            data["text"] = extracted_text
+            return json.dumps(data)
+        except Exception as e:
+            print(f"Text Analysis API Error: {e}")
+            fallback_json = {
+                "category": "miscellaneous", 
+                "confidence": 70, 
+                "metadata": {}, 
+                "summary": extracted_text[:300], 
+                "text": extracted_text
+            }
+            import json
+            return json.dumps(fallback_json)
+
     async def analyze_document(self, images_base64: list[str]):
         prompt = """
         Analyze this document image(s). 

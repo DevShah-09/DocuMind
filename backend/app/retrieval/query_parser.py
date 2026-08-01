@@ -95,7 +95,7 @@ class QueryParser:
 
     def _call_llm(self, query: str) -> str:
         response = self._client.chat.completions.create(
-            model="qwen/qwen2.5-vl-72b-instruct",
+            model="qwen/qwen-2.5-7b-instruct",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": query},

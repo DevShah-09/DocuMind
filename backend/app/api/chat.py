@@ -160,13 +160,15 @@ async def chat(
         )
 
     try:
-        # 1. Parse
-        parsed: ParsedQuery = await query_parser.parse(request.query)
-
-        # 2. Embed
-        query_vector = await embedding_service.embed_query(
-            parsed.semantic_query or request.query
-        )
+        # 1 & 2. Parse query & Embed query in PARALLEL via asyncio.gather
+        parsed_task = query_parser.parse(request.query)
+        embed_task = embedding_service.embed_query(request.query)
+        
+        parsed, query_vector = await asyncio.gather(parsed_task, embed_task)
+        
+        # If semantic query was extracted clean, re-embed only if different
+        if parsed.semantic_query and parsed.semantic_query != request.query:
+            query_vector = await embedding_service.embed_query(parsed.semantic_query)
 
         # 3. Build filters
         filters: Dict = {}
@@ -177,14 +179,26 @@ async def chat(
         if parsed.month:
             filters["month"] = parsed.month
 
-        # 4. Vector search
+        # 4. Vector search with strict metadata filters
         raw_chunks = await qdrant_store.search_chunks(
             query_vector=query_vector,
             user_id=user_id,
             filters=filters,
-            limit=request.limit * 2,
+            limit=request.limit * 4,
             score_threshold=request.score_threshold,
         )
+
+        # 4a. If specific document_type filter returned nothing, retry without document_type filter
+        if not raw_chunks and parsed.document_type:
+            logger.info("[CHAT] No chunks for document_type '%s', retrying un-filtered search", parsed.document_type)
+            relaxed_filters = {k: v for k, v in filters.items() if k != "document_type"}
+            raw_chunks = await qdrant_store.search_chunks(
+                query_vector=query_vector,
+                user_id=user_id,
+                filters=relaxed_filters,
+                limit=request.limit * 4,
+                score_threshold=request.score_threshold,
+            )
 
         logger.info("[CHAT] %d raw chunks retrieved for user=%s", len(raw_chunks), user_id)
 
@@ -238,24 +252,16 @@ async def chat(
             : request.limit * 4  # allow more chunks so context is richer
         ]
 
-        # 6. Build context
-        context_tuples = []
-        for chunk in top_chunks:
-            p = chunk.payload or {}
-            context_tuples.append((
-                p.get("filename", p.get("original_name", "document")),
-                p.get("document_type", "document"),
-                p.get("text", p.get("text_content", "")),
-                p.get("page_number", 1),
-            ))
+        # 6. Check intent: Does the user explicitly ask a question/summary/explanation, or just want to fetch/find documents?
+        q_lower = request.query.lower().strip()
+        analysis_keywords = {
+            "summarize", "summary", "explain", "what is", "what are", "how much", 
+            "total", "details", "compare", "why", "list all", "extract", "reading",
+            "calculate", "who is", "when did", "date of"
+        }
+        requires_llm_answer = any(kw in q_lower for kw in analysis_keywords) or q_lower.endswith("?")
 
-        context_str = _build_context(context_tuples)
-
-        # 7. LLM call (async via thread pool)
-        loop = asyncio.get_event_loop()
-        answer = await loop.run_in_executor(None, _call_llm, request.query, context_str)
-
-        # 8. Build sources — one entry per unique document (best-scoring chunk metadata)
+        # 7. Build sources — one entry per unique document (best-scoring chunk metadata)
         seen_source_docs: Dict[str, bool] = {}
         sources: List[ChatSource] = []
         for chunk in top_chunks:
@@ -274,6 +280,33 @@ async def chat(
                 month=p.get("month"),
                 preview_url="",
             ))
+
+        # Cap sources to top 3 matches
+        sources = sources[:3]
+
+        # 8. If pure document retrieval (e.g. "give me aadhar card", "show bank statement"), return document cards without full LLM generation
+        if not requires_llm_answer:
+            if sources:
+                top_doc = sources[0]
+                top_score = int(round(top_doc.score * 100))
+                answer = f"Found {len(sources)} matching document{'s' if len(sources) > 1 else ''} for \"{request.query}\". Best match: **{top_doc.filename}** ({top_score}% relevance)."
+            else:
+                answer = f"No documents matched \"{request.query}\". Try a different query or upload more documents."
+        else:
+            # Full LLM RAG call when explicitly asked (summarize, explain, questions)
+            context_tuples = []
+            for chunk in top_chunks:
+                p = chunk.payload or {}
+                context_tuples.append((
+                    p.get("filename", p.get("original_name", "document")),
+                    p.get("document_type", "document"),
+                    p.get("text", p.get("text_content", "")),
+                    p.get("page_number", 1),
+                ))
+
+            context_str = _build_context(context_tuples)
+            loop = asyncio.get_event_loop()
+            answer = await loop.run_in_executor(None, _call_llm, request.query, context_str)
 
         latency_ms = round((time.monotonic() - t0) * 1000, 2)
         logger.info(
