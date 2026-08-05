@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { FolderOpen, FileText, MoreVertical, Trash2, Edit, Loader2 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
@@ -48,6 +48,15 @@ const MyCollections = ({ collections, setCollections, collectionsLoading, fetchC
   const [selectedCollection, setSelectedCollection] = useState(null);
   const [docToDelete, setDocToDelete] = useState(null);
   const { getAccessToken } = useAuth();
+
+  // Auto-refresh collections on mount and periodically (every 10s)
+  useEffect(() => {
+    fetchCollections();
+    const intervalId = setInterval(() => {
+      fetchCollections();
+    }, 10000);
+    return () => clearInterval(intervalId);
+  }, [fetchCollections]);
 
   const handleDeleteDocument = async () => {
     if (!docToDelete) return;

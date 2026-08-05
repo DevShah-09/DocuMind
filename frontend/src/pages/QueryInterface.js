@@ -293,7 +293,7 @@ const QueryInterface = () => {
       messagesRef.current = finalMessages;
       setMessages(finalMessages);
 
-      // ── Upsert session entry in localStorage history ──────────────────────
+      // ── Upsert session entry in history ──────────────────────────────────
       const sessionId = sessionIdRef.current;
       const historyEntry = {
         id: sessionId,
@@ -303,11 +303,25 @@ const QueryInterface = () => {
         topFile: sources[0]?.filename || null,
         snapshot: { messages: finalMessages, results: sources },
       };
+
+      // 1. Sync to localStorage for immediate offline access
       try {
         const existing = JSON.parse(localStorage.getItem('qi_history') || '[]');
         const filtered = existing.filter((e) => e.id !== sessionId);
         localStorage.setItem('qi_history', JSON.stringify([historyEntry, ...filtered].slice(0, 200)));
       } catch { /* ignore storage errors */ }
+
+      // 2. Sync to Backend API for cross-device persistence
+      if (token) {
+        fetch(`${API_BASE}/history`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(historyEntry),
+        }).catch((err) => console.error('Failed to sync history to server:', err));
+      }
 
     } catch (err) {
       const errMessage = {
