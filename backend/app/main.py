@@ -8,6 +8,7 @@ from app.api import upload, search
 from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.documents_secure import router as documents_secure_router
+from app.api.history import router as history_router
 from app.api.retrieval import router as retrieval_router
 from app.core.config import settings
 
@@ -55,6 +56,7 @@ app.include_router(search.router)             # /collections/*
 app.include_router(documents_secure_router)   # /documents/generate-signed-url/*
 app.include_router(retrieval_router)          # /search/*  /documents/{id}  /documents/{id}/preview
 app.include_router(chat_router)               # /chat
+app.include_router(history_router)            # /history
 
 # ── CORS (OUTERMOST MIDDLEWARE) ────────────────────────────────────────────────
 # We add this LAST so it's the first thing that catches incoming requests 

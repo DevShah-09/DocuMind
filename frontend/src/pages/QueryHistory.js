@@ -6,6 +6,9 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '@/contexts/AuthContext';
+
+const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 // ── Time-ago helper ──────────────────────────────────────────────────────────
 function timeAgo(isoString) {
@@ -66,31 +69,80 @@ function InlineRename({ value, onSave, onCancel }) {
 // ── Main Component ────────────────────────────────────────────────────────────
 const QueryHistory = () => {
   const navigate = useNavigate();
+  const { getAccessToken } = useAuth();
   const [history, setHistory] = useState([]);
   const [editingId, setEditingId] = useState(null); // id of item being renamed
 
-  // Load history from localStorage on mount
+  // Load history from API (fallback to localStorage) on mount
   useEffect(() => {
-    try {
-      const stored = JSON.parse(localStorage.getItem('qi_history') || '[]');
-      setHistory(stored);
-    } catch {
-      setHistory([]);
+    let isMounted = true;
+    async function loadHistory() {
+      const token = getAccessToken();
+      if (token) {
+        try {
+          const res = await fetch(`${API_BASE}/history`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (isMounted && Array.isArray(data) && data.length > 0) {
+              setHistory(data);
+              try { localStorage.setItem('qi_history', JSON.stringify(data)); } catch { /* ignore */ }
+              return;
+            }
+          }
+        } catch (err) {
+          console.error('Failed to fetch remote history:', err);
+        }
+      }
+      // Fallback to local storage if offline or endpoint empty
+      try {
+        const stored = JSON.parse(localStorage.getItem('qi_history') || '[]');
+        if (isMounted) setHistory(stored);
+      } catch {
+        if (isMounted) setHistory([]);
+      }
     }
-  }, []);
+    loadHistory();
+    return () => { isMounted = false; };
+  }, [getAccessToken]);
 
-  const persist = (updated) => {
+  const persist = (updated, updatedItem = null) => {
     setHistory(updated);
     try { localStorage.setItem('qi_history', JSON.stringify(updated)); } catch { /* ignore */ }
+    const token = getAccessToken();
+    if (token && updatedItem) {
+      fetch(`${API_BASE}/history`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(updatedItem),
+      }).catch((err) => console.error('Failed to persist history item:', err));
+    }
   };
 
   const handleDeleteItem = (e, itemId) => {
     e.stopPropagation();
-    persist(history.filter((h) => h.id !== itemId));
+    const updated = history.filter((h) => h.id !== itemId);
+    setHistory(updated);
+    try { localStorage.setItem('qi_history', JSON.stringify(updated)); } catch { /* ignore */ }
+    const token = getAccessToken();
+    if (token) {
+      fetch(`${API_BASE}/history/${itemId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch((err) => console.error('Failed to delete history item:', err));
+    }
   };
 
   const handleRename = (itemId, newName) => {
-    persist(history.map((h) => h.id === itemId ? { ...h, label: newName } : h));
+    const targetItem = history.find((h) => h.id === itemId);
+    if (!targetItem) return;
+    const updatedItem = { ...targetItem, label: newName };
+    const updated = history.map((h) => h.id === itemId ? updatedItem : h);
+    persist(updated, updatedItem);
     setEditingId(null);
   };
 
