@@ -16,14 +16,23 @@ Why this exists:
 import logging
 import os
 
+# pyrefly: ignore [missing-import]
 from qdrant_client import QdrantClient
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_storage_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "qdrant_storage")
-)
-os.makedirs(_storage_path, exist_ok=True)
-
-logger.info("[QDRANT] Shared client → local storage: %s", _storage_path)
-shared_qdrant_client = QdrantClient(path=_storage_path)
+if settings.QDRANT_URL:
+    logger.info("[QDRANT] Shared client → Qdrant Cloud: %s", settings.QDRANT_URL)
+    shared_qdrant_client = QdrantClient(
+        url=settings.QDRANT_URL,
+        api_key=settings.QDRANT_API_KEY or None,
+    )
+else:
+    _storage_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "qdrant_storage")
+    )
+    os.makedirs(_storage_path, exist_ok=True)
+    logger.info("[QDRANT] Shared client → local storage: %s", _storage_path)
+    shared_qdrant_client = QdrantClient(path=_storage_path)

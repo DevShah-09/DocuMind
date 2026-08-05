@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     # ── Qdrant ─────────────────────────────────────────────────────
     QDRANT_HOST: str = "localhost"
     QDRANT_PORT: str = "6333"
+    QDRANT_URL: str = ""
+    QDRANT_API_KEY: str = ""
     CHUNKS_COLLECTION: str = "document_chunks"
 
     # ── Embeddings ────────────────────────────────────────────────────
