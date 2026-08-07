@@ -70,24 +70,30 @@ const MyCollections = ({ collections, setCollections, collectionsLoading, fetchC
 
       if (response.ok) {
         toast.success('Document deleted successfully');
-        // Optimistically update local state, then refresh from server
+        // Optimistically update local state — guard col.docs with fallback to []
         setCollections(prev =>
           prev
-            .map(col => ({
-              ...col,
-              docs: col.docs.filter(d => d.id !== docToDelete.id),
-              documents: col.docs.filter(d => d.id !== docToDelete.id).length,
-            }))
+            .map(col => {
+              const filteredDocs = (col.docs || []).filter(d => d.id !== docToDelete.id);
+              return { ...col, docs: filteredDocs, documents: filteredDocs.length };
+            })
             .filter(col => col.documents > 0)
         );
         if (selectedCollection) {
-          setSelectedCollection(prev => ({
-            ...prev,
-            docs: prev.docs.filter(d => d.id !== docToDelete.id),
-            documents: prev.documents - 1,
-          }));
+          const updatedDocs = (selectedCollection.docs || []).filter(d => d.id !== docToDelete.id);
+          if (updatedDocs.length === 0) {
+            // Close the dialog if the collection is now empty
+            setSelectedCollection(null);
+          } else {
+            setSelectedCollection(prev => ({
+              ...prev,
+              docs: updatedDocs,
+              documents: updatedDocs.length,
+            }));
+          }
         }
-        fetchCollections();
+        // Refresh from server after a short delay to avoid race with optimistic update
+        setTimeout(() => fetchCollections(), 300);
       } else {
         toast.error('Failed to delete document');
       }
