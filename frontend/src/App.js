@@ -29,6 +29,18 @@ function AppShell({ darkMode, toggleDarkMode }) {
   // ── Persisted upload queue ──────────────────────────────────────────────────
   const [uploadQueue, setUploadQueue] = useState([]);
 
+  // ── Key to force QueryInterface remount on "New Query" ──────────────────────
+  const [newQueryKey, setNewQueryKey] = useState(0);
+
+  const handleNewQuery = () => {
+    sessionStorage.removeItem('qi_messages');
+    sessionStorage.removeItem('qi_results');
+    sessionStorage.removeItem('qi_query');
+    sessionStorage.removeItem('qi_session_id');
+    sessionStorage.removeItem('qi_last_searched_query');
+    setNewQueryKey((k) => k + 1);
+  };
+
   // ── Persisted collections ───────────────────────────────────────────────────
   const [collections, setCollections] = useState([]);
   const [collectionsLoading, setCollectionsLoading] = useState(false);
@@ -76,11 +88,11 @@ function AppShell({ darkMode, toggleDarkMode }) {
 
   return (
     <div className="flex h-screen overflow-hidden">
-      <Sidebar />
+      <Sidebar onNewQuery={handleNewQuery} />
       <main className="flex-1 overflow-auto">
         <Routes>
           <Route path="/" element={<Navigate to="/query" replace />} />
-          <Route path="/query" element={<QueryInterface />} />
+          <Route path="/query" element={<QueryInterface key={newQueryKey} />} />
           <Route path="/upload" element={<UploadDocuments queue={uploadQueue} setQueue={setUploadQueue} />} />
           <Route
             path="/collections"

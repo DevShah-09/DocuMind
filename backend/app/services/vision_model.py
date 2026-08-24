@@ -1,10 +1,10 @@
 import base64
-from openai import OpenAI
+from openai import AsyncOpenAI
 from app.core.config import settings
 
 class VisionProcessor:
     def __init__(self):
-        self.client = OpenAI(
+        self.client = AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=settings.OPENROUTER_API_KEY,
         )
@@ -27,7 +27,7 @@ class VisionProcessor:
 
         try:
             # Use fast text-only Qwen 7B or 72B text model
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="qwen/qwen-2.5-7b-instruct",
                 messages=[
                     {"role": "system", "content": "You are a document extraction assistant. Respond ONLY with valid JSON."},
@@ -80,7 +80,7 @@ class VisionProcessor:
             content_array.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}})
         
         try:
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="qwen/qwen2.5-vl-72b-instruct",
                 messages=[{
                     "role": "user",

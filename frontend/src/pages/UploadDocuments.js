@@ -177,23 +177,23 @@ const ResultCard = ({ result, onRemove }) => {
 };
 
 // ── Main Component ───────────────────────────────────────────────────────────
+const MAX_CONCURRENT_UPLOADS = 3;
+
 const UploadDocuments = ({ queue, setQueue }) => {
   const [dragActive, setDragActive] = useState(false);
   const { getAccessToken }          = useAuth();
   const fileInputRef                = useRef(null);
-  const isProcessingRef             = useRef(false);
+  const activeProcessingRef         = useRef(new Set());
 
   const isProcessing = queue.some(item => item.status === 'processing');
 
   const processQueueItem = useCallback(async (itemToProcess) => {
-    isProcessingRef.current = true;
-
-    // Set status to processing
+    // Mark item as actively processing in state
     setQueue(prev => prev.map(item =>
       item.id === itemToProcess.id ? { ...item, status: 'processing', stageIndex: 0, progress: 0 } : item
     ));
 
-    // Simulated stage ticker
+    // Simulated stage ticker per item
     let currentStage = 0;
     const ticker = setInterval(() => {
       currentStage += 1;
@@ -210,7 +210,7 @@ const UploadDocuments = ({ queue, setQueue }) => {
             : item
         ));
       }
-    }, 2200);
+    }, 2000);
 
     try {
       const formData = new FormData();
@@ -270,20 +270,29 @@ const UploadDocuments = ({ queue, setQueue }) => {
       ));
       toast.error(`Failed to upload "${itemToProcess.name}": ${msg}`);
     } finally {
-      // Small pause so user sees 100%
-      await new Promise(resolve => setTimeout(resolve, 800));
-      isProcessingRef.current = false;
-      // Trigger next check in useEffect
+      // Small pause so user sees completion state
+      await new Promise(resolve => setTimeout(resolve, 600));
+      activeProcessingRef.current.delete(itemToProcess.id);
+      // Trigger next tick for any remaining pending items
       setQueue(prev => [...prev]);
     }
-  }, [getAccessToken]);
+  }, [getAccessToken, setQueue]);
 
-  // Sequential processing loop
+  // Parallel processing loop: dispatch up to MAX_CONCURRENT_UPLOADS items simultaneously
   useEffect(() => {
-    if (isProcessingRef.current) return;
-    const pendingItem = queue.find(item => item.status === 'pending');
-    if (pendingItem) {
-      processQueueItem(pendingItem);
+    const currentlyProcessing = activeProcessingRef.current.size;
+    const availableSlots = MAX_CONCURRENT_UPLOADS - currentlyProcessing;
+
+    if (availableSlots > 0) {
+      const pendingItems = queue.filter(
+        item => item.status === 'pending' && !activeProcessingRef.current.has(item.id)
+      );
+      const itemsToStart = pendingItems.slice(0, availableSlots);
+
+      itemsToStart.forEach(item => {
+        activeProcessingRef.current.add(item.id);
+        processQueueItem(item);
+      });
     }
   }, [queue, processQueueItem]);
 

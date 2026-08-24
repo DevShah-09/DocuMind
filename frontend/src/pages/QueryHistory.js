@@ -163,7 +163,17 @@ const QueryHistory = () => {
     navigate(`/query?q=${encodeURIComponent(item.query)}`);
   };
 
-  const handleClearHistory = () => persist([]);
+  const handleClearHistory = () => {
+    persist([]);
+    // Also wipe from backend so it doesn't reappear on refresh
+    const token = getAccessToken();
+    if (token) {
+      fetch(`${API_BASE}/history`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch((err) => console.error('Failed to clear history on server:', err));
+    }
+  };
 
   return (
     <div className="px-8 py-12" data-testid="query-history">

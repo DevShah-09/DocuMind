@@ -71,10 +71,15 @@ class DocumentOrchestrator:
                 # If text is minimal (<50 words), treat as scanned PDF and render images
                 if len(extracted_text.split()) < 50:
                     extracted_text = ""
-                    for page_num in range(min(3, len(doc))):
+                    # 2-page, 1.25x first-pass optimization:
+                    # - Reduced from 3 pages → max 2 pages (less payload to the VL model)
+                    # - Reduced from 1.5x → 1.25x zoom (~116 DPI; balances legibility vs size)
+                    # This is a page-count + resolution change only — model is unchanged.
+                    # Benchmark actual latency before considering further optimizations (e.g. 7B VL).
+                    max_pages = min(2, len(doc))
+                    for page_num in range(max_pages):
                         page = doc.load_page(page_num)
-                        # Standard 150 DPI scaling (zoom=1.5) instead of 2.0 to keep payload small
-                        mat = fitz.Matrix(1.5, 1.5)
+                        mat = fitz.Matrix(1.25, 1.25)
                         pix = page.get_pixmap(matrix=mat)
                         img_bytes = pix.tobytes("jpeg")
                         images_base64.append(base64.b64encode(img_bytes).decode('utf-8'))

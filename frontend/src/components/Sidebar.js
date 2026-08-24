@@ -15,17 +15,13 @@ import { cn } from '@/lib/utils';
 import { useAuth } from '@/contexts/AuthContext';
 import { toast } from 'sonner';
 
-const Sidebar = () => {
+const Sidebar = ({ onNewQuery }) => {
   const location = useLocation();
   const navigate = useNavigate();
   const { user, signOut } = useAuth();
 
   const handleNewQuery = () => {
-    // Clear the active chat session so QueryInterface starts fresh
-    sessionStorage.removeItem('qi_messages');
-    sessionStorage.removeItem('qi_results');
-    sessionStorage.removeItem('qi_query');
-    sessionStorage.removeItem('qi_session_id'); // force new session ID on next query
+    if (onNewQuery) onNewQuery();
     navigate('/query');
   };
 

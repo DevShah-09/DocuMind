@@ -95,11 +95,12 @@ const MyCollections = ({ collections, setCollections, collectionsLoading, fetchC
         // Refresh from server after a short delay to avoid race with optimistic update
         setTimeout(() => fetchCollections(), 300);
       } else {
-        toast.error('Failed to delete document');
+        const errJson = await response.json().catch(() => ({}));
+        toast.error(errJson.detail || 'Failed to delete document');
       }
     } catch (error) {
       console.error('Delete error:', error);
-      toast.error('An error occurred while deleting');
+      toast.error('An error occurred while deleting: ' + error.message);
     } finally {
       setDocToDelete(null);
     }
