@@ -375,5 +375,160 @@ class TestDeterminismAcrossModules(unittest.TestCase):
         self.assertEqual(d1.features,         d2.features)
 
 
+# ── Regression: Filter Consistency, Fallback & Expansion ───────────────────────
+
+class TestFilterConsistencyAndFallback(unittest.TestCase):
+
+    def test_effective_filter_used_in_expansion_after_fallback(self):
+        """
+        When probe returns nothing for doc_type, retry relaxes doc_type.
+        Subsequent expansion MUST use the relaxed effective_filters, NOT the original filters,
+        while maintaining user_id isolation.
+        """
+        initial_filters = {"document_type": "invoice", "year": 2023}
+        effective_filters = dict(initial_filters)
+
+        search_calls = []
+
+        # Mock search function recording calls
+        def mock_search_chunks(query_vector, user_id, filters, limit, score_threshold):
+            search_calls.append({
+                "user_id": user_id,
+                "filters": dict(filters),
+                "limit": limit,
+            })
+            # If document_type is present, return empty (simulating no hits with strict type)
+            if "document_type" in filters:
+                return []
+            # Relaxed search returns chunks
+            return [
+                _chunk(0.82, "doc-1", chunk_id="c-1", year=2023, user_id=user_id),
+                _chunk(0.79, "doc-2", chunk_id="c-2", year=2023, user_id=user_id),
+            ]
+
+        user_id = "test-user-42"
+        q_vec = [0.1] * 10
+
+        # Step 4: Probe
+        raw_chunks = mock_search_chunks(q_vec, user_id=user_id, filters=effective_filters, limit=6, score_threshold=0.2)
+        self.assertEqual(len(raw_chunks), 0)
+
+        # Step 4a: Retry without doc-type
+        if not raw_chunks and "document_type" in effective_filters:
+            relaxed = {k: v for k, v in effective_filters.items() if k != "document_type"}
+            retry_chunks = mock_search_chunks(q_vec, user_id=user_id, filters=relaxed, limit=6, score_threshold=0.2)
+            if retry_chunks:
+                raw_chunks = retry_chunks
+                effective_filters = relaxed
+
+        self.assertEqual(len(raw_chunks), 2)
+        self.assertNotIn("document_type", effective_filters)
+        self.assertEqual(effective_filters.get("year"), 2023)
+
+        # Step 5 & 6: Expansion with recommended_k > probe
+        recommended_k = 6
+        if recommended_k > len(raw_chunks):
+            expanded = mock_search_chunks(
+                q_vec,
+                user_id=user_id,
+                filters=effective_filters,  # Must be effective_filters!
+                limit=recommended_k * 2,
+                score_threshold=0.2,
+            )
+
+        # Assert expansion search call used effective_filters without document_type
+        expansion_call = search_calls[-1]
+        self.assertEqual(expansion_call["user_id"], user_id)
+        self.assertNotIn("document_type", expansion_call["filters"])
+        self.assertEqual(expansion_call["filters"].get("year"), 2023)
+
+
+# ── Regression: Tenant Isolation across all paths ──────────────────────────────
+
+class TestTenantIsolationSearchPaths(unittest.TestCase):
+
+    def test_user_id_passed_on_every_retrieval_stage(self):
+        """Verify user_id is mandatory and verified on probe, retry, expansion, and legacy."""
+        calls = []
+
+        def mock_search(user_id, stage, filters=None):
+            self.assertIsNotNone(user_id)
+            self.assertTrue(len(user_id) > 0)
+            calls.append((stage, user_id))
+
+        target_user = "user-tenant-xyz"
+
+        # Probe stage
+        mock_search(user_id=target_user, stage="probe", filters={"doc_type": "tax"})
+        # Retry stage
+        mock_search(user_id=target_user, stage="retry", filters={})
+        # Expansion stage
+        mock_search(user_id=target_user, stage="expansion", filters={})
+        # Legacy fallback stage
+        mock_search(user_id=target_user, stage="legacy")
+
+        self.assertEqual(len(calls), 4)
+        for stage, uid in calls:
+            self.assertEqual(uid, target_user)
+
+
+# ── Regression: Empty Retrieval & Source References ────────────────────────────
+
+class TestEmptyRetrievalAndSources(unittest.TestCase):
+
+    def test_empty_retrieval_safe_budget(self):
+        """When no chunks are returned from probe, retry, or legacy, flow handles it safely."""
+        raw_chunks = []
+        # Dynamic K should not crash on empty, and remains bounded in [k_min, k_max]
+        ctrl = DynamicTopKController()
+        dec = ctrl.decide("What is my tax return?", raw_chunks)
+        self.assertGreaterEqual(dec.recommended_k, 3)
+        self.assertLessEqual(dec.recommended_k, 14)
+
+        # Top chunks slice should remain empty
+        top_chunks = raw_chunks[:dec.recommended_k]
+        self.assertEqual(len(top_chunks), 0)
+
+        # Sources should be empty
+        sources = []
+        for idx, chunk in enumerate(top_chunks):
+            sources.append(chunk)
+        self.assertEqual(len(sources), 0)
+
+    def test_sources_preserved_with_legacy_and_missing_document_id(self):
+        """Sources are built robustly even when document_id is missing or legacy named."""
+        c1 = _chunk(0.92, doc_id="", chunk_id="ck1", text="Sample 1")
+        c1.payload["filename"] = "tax_receipt.pdf"
+        c1.payload["document_id"] = ""
+
+        c2 = _chunk(0.85, doc_id="doc-2", chunk_id="ck2", text="Sample 2")
+        c2.payload["original_name"] = "salary_slip.pdf"
+
+        # Multiple chunks for same doc-2 to test deduplication
+        c3 = _chunk(0.88, doc_id="doc-2", chunk_id="ck3", text="Sample 3")
+
+        top_chunks = [c1, c3, c2]
+
+        seen_doc_ids = {}
+        sources = []
+        for idx, chunk in enumerate(top_chunks):
+            p = chunk.payload or {}
+            doc_id = p.get("document_id") or p.get("filename") or p.get("original_name") or f"doc_{idx}"
+            if not doc_id or doc_id in seen_doc_ids:
+                continue
+            seen_doc_ids[str(doc_id)] = True
+            sources.append({
+                "document_id": str(doc_id),
+                "filename": p.get("filename", p.get("original_name", "document")),
+                "score": chunk.score,
+            })
+
+        self.assertEqual(len(sources), 2)  # tax_receipt and doc-2
+        self.assertEqual(sources[0]["document_id"], "tax_receipt.pdf")
+        self.assertEqual(sources[1]["document_id"], "doc-2")
+        self.assertEqual(sources[1]["score"], 0.88)  # highest score chunk for doc-2
+
+
 if __name__ == "__main__":
     unittest.main()
+

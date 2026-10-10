@@ -244,6 +244,8 @@ async def chat(
         if parsed.month:
             filters["month"] = parsed.month
 
+        effective_filters: Dict[str, Any] = dict(filters)
+
         # ── 4. Initial probe retrieval ─────────────────────────────────────────
         t_retrieval_start = time.monotonic()
         dynamic_k_diag: Optional[DynamicKDiagnostics] = None
@@ -253,7 +255,7 @@ async def chat(
         raw_chunks = await qdrant_store.search_chunks(
             query_vector=query_vector,
             user_id=user_id,           # ← user_id ALWAYS applied
-            filters=filters,
+            filters=effective_filters,
             limit=probe_limit,
             score_threshold=request.score_threshold,
         )
@@ -264,14 +266,17 @@ async def chat(
                 "[CHAT] No chunks for document_type=%r; retrying without type filter",
                 parsed.document_type,
             )
-            relaxed = {k: v for k, v in filters.items() if k != "document_type"}
-            raw_chunks = await qdrant_store.search_chunks(
+            relaxed = {k: v for k, v in effective_filters.items() if k != "document_type"}
+            retry_chunks = await qdrant_store.search_chunks(
                 query_vector=query_vector,
                 user_id=user_id,       # ← user_id ALWAYS applied
                 filters=relaxed,
                 limit=probe_limit,
                 score_threshold=request.score_threshold,
             )
+            if retry_chunks:
+                raw_chunks = retry_chunks
+                effective_filters = relaxed
 
         # ── 4b. Legacy collection fallback ────────────────────────────────────
         if not raw_chunks:
@@ -325,20 +330,33 @@ async def chat(
                 expanded = await qdrant_store.search_chunks(
                     query_vector=query_vector,
                     user_id=user_id,   # ← user_id ALWAYS applied on expansion
-                    filters=filters if raw_chunks else {},
+                    filters=effective_filters,  # ← Preserves effective filter from successful search
                     limit=fetch_limit,
                     score_threshold=request.score_threshold,
                 )
                 if expanded:
-                    raw_chunks  = expanded
+                    # Deduplicate merged chunks while preserving highest scores
+                    seen_chunk_keys = set()
+                    combined_chunks = []
+                    for c in expanded + raw_chunks:
+                        p = c.payload or {}
+                        cid = getattr(c, "id", None) or (
+                            p.get("document_id", ""),
+                            p.get("chunk_index", 0),
+                            p.get("text", "")[:50],
+                        )
+                        if cid not in seen_chunk_keys:
+                            seen_chunk_keys.add(cid)
+                            combined_chunks.append(c)
+                    raw_chunks  = combined_chunks
                     stop_reason = "max_k_reached" if len(expanded) < fetch_limit else "sufficient_evidence"
 
             # ── 7. Document Diversity Guard ────────────────────────────────────
             doc_chunks: Dict[str, list] = defaultdict(list)
-            for chunk in raw_chunks:
-                did = (chunk.payload or {}).get("document_id", "")
-                if did:
-                    doc_chunks[did].append(chunk)
+            for idx, chunk in enumerate(raw_chunks):
+                p = chunk.payload or {}
+                did = p.get("document_id") or p.get("filename") or p.get("original_name") or f"doc_{idx}"
+                doc_chunks[str(did)].append(chunk)
 
             sorted_docs = sorted(
                 doc_chunks.items(),
@@ -366,15 +384,18 @@ async def chat(
                 selected_chunks.extend(best_for_doc[: decision.chunks_per_document])
                 selected_doc_count += 1
 
+            if not selected_chunks and raw_chunks:
+                selected_chunks = sorted(raw_chunks, key=lambda c: c.score, reverse=True)[: decision.recommended_k]
+
             top_chunks = sorted(selected_chunks, key=lambda c: c.score, reverse=True)[: decision.recommended_k]
 
         else:
             # ── Static fallback: top-4 per document up to limit * 4 ───────────
             doc_chunks_static: Dict[str, list] = defaultdict(list)
-            for chunk in raw_chunks:
-                did = (chunk.payload or {}).get("document_id", "")
-                if did:
-                    doc_chunks_static[did].append(chunk)
+            for idx, chunk in enumerate(raw_chunks):
+                p = chunk.payload or {}
+                did = p.get("document_id") or p.get("filename") or p.get("original_name") or f"doc_{idx}"
+                doc_chunks_static[str(did)].append(chunk)
 
             flattened: list = []
             for _, chunks_for_doc in doc_chunks_static.items():
@@ -397,14 +418,14 @@ async def chat(
         # ── 9. Build source list ───────────────────────────────────────────────
         seen_doc_ids: Dict[str, bool] = {}
         sources: List[ChatSource] = []
-        for chunk in top_chunks:
+        for idx, chunk in enumerate(top_chunks):
             p      = chunk.payload or {}
-            doc_id = p.get("document_id", "")
+            doc_id = p.get("document_id") or p.get("filename") or p.get("original_name") or f"doc_{idx}"
             if not doc_id or doc_id in seen_doc_ids:
                 continue
-            seen_doc_ids[doc_id] = True
+            seen_doc_ids[str(doc_id)] = True
             sources.append(ChatSource(
-                document_id=doc_id,
+                document_id=str(doc_id),
                 filename=p.get("filename", p.get("original_name", "document")),
                 document_type=p.get("document_type", "document"),
                 summary=p.get("summary", ""),
