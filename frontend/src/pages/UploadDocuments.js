@@ -30,6 +30,8 @@ const CATEGORY_META = {
   legal_document:    { label: 'Legal Document',     color: 'text-slate-500',   bg: 'bg-slate-100 dark:bg-slate-800' },
   tax_document:      { label: 'Tax Document',       color: 'text-lime-600',    bg: 'bg-lime-100 dark:bg-lime-900/20' },
   resume:            { label: 'Resume / CV',        color: 'text-sky-500',     bg: 'bg-sky-100 dark:bg-sky-900/20' },
+  student_id_card:   { label: 'Student Identity Card', color: 'text-indigo-600', bg: 'bg-indigo-100 dark:bg-indigo-900/20' },
+  student_identity_card: { label: 'Student Identity Card', color: 'text-indigo-600', bg: 'bg-indigo-100 dark:bg-indigo-900/20' },
   miscellaneous:     { label: 'Miscellaneous',      color: 'text-gray-500',    bg: 'bg-gray-100 dark:bg-gray-800' },
 };
 
@@ -57,7 +59,10 @@ const MAX_SIZE_MB    = 20;
 const ResultCard = ({ result, onRemove }) => {
   const [expanded, setExpanded] = useState(false);
   const meta = getCategoryMeta(result.category);
-  const confidence = result.confidence ?? 0;
+  const rawConf = result.confidence ?? 0;
+  const confidence = (typeof rawConf === 'number' && rawConf <= 1.0 && rawConf > 0)
+    ? Math.round(rawConf * 100)
+    : Math.round(rawConf);
 
   return (
     <motion.div

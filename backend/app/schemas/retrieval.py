@@ -46,6 +46,7 @@ class SearchRequest(BaseModel):
     document_type_filter: Optional[str] = Field(None, description="Force filter by document type")
     year_filter: Optional[int] = Field(None, description="Force filter by year")
     month_filter: Optional[str] = Field(None, description="Force filter by month")
+    dynamic_k_enabled: bool = Field(True, description="Enable adaptive Dynamic Top-K governor")
 
     @field_validator("query")
     @classmethod
@@ -83,6 +84,24 @@ class SearchResult(BaseModel):
     entities: List[str] = Field(default_factory=list)
 
 
+# ── Dynamic Top-K Diagnostics ──────────────────────────────────────────────────
+
+class DynamicKDiagnostics(BaseModel):
+    """Explainable diagnostics emitted by the Dynamic Top-K Retrieval Governor."""
+    recommended_k: int = Field(..., description="Calculated total chunk retrieval quota")
+    target_documents: int = Field(..., description="Expected number of unique documents needed")
+    chunks_per_document: int = Field(..., description="Max chunk quota per document for diversity")
+    c_q: float = Field(..., description="Query complexity score [0–1]")
+    r_c: float = Field(..., description="Retrieval confidence score [0–1]")
+    s_top: float = Field(..., description="Highest chunk similarity score")
+    s_avg: float = Field(..., description="Average similarity score across top candidates")
+    knee_gap: float = Field(..., description="Maximum inflection drop between adjacent ranks")
+    knee_index: int = Field(..., description="1-based rank index immediately before the cliff")
+    evidence_alignment: float = Field(..., description="Grounding match between query constraints and candidates")
+    features: Dict[str, float] = Field(default_factory=dict, description="Normalized f1..f8 complexity features")
+    explanation: str = Field("", description="Human-readable decision explanation")
+
+
 class SearchResponse(BaseModel):
     """Full response for POST /search."""
     query: str
@@ -92,6 +111,7 @@ class SearchResponse(BaseModel):
     page: int
     limit: int
     latency_ms: float
+    dynamic_k: Optional[DynamicKDiagnostics] = Field(None, description="Dynamic Top-K governor diagnostics")
 
 
 # ── Query Parse Endpoint ───────────────────────────────────────────────────────
@@ -164,6 +184,7 @@ class ChatRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=1000, description="Natural language query or instruction")
     limit: int = Field(5, ge=1, le=20, description="Max source documents to retrieve")
     score_threshold: float = Field(0.10, ge=0.0, le=1.0, description="Minimum similarity score for retrieval")
+    dynamic_k_enabled: bool = Field(True, description="Enable adaptive Dynamic Top-K governor")
 
 
 class ChatSource(BaseModel):
@@ -184,4 +205,6 @@ class ChatResponse(BaseModel):
     sources: List[ChatSource] = Field(default_factory=list)
     parsed_query: Optional[ParsedQuery] = None
     latency_ms: float
+    dynamic_k: Optional[DynamicKDiagnostics] = Field(None, description="Dynamic Top-K governor diagnostics")
+
 

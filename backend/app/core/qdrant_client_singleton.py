@@ -28,6 +28,8 @@ if settings.QDRANT_URL:
     shared_qdrant_client = QdrantClient(
         url=settings.QDRANT_URL,
         api_key=settings.QDRANT_API_KEY or None,
+        check_compatibility=False,
+        timeout=60.0,
     )
 else:
     _storage_path = os.path.abspath(

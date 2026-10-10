@@ -20,9 +20,10 @@ import re
 from typing import Any, Dict, List, Optional
 
 from app.embeddings.embedding_service import embedding_service
+from app.retrieval.dynamic_k import dynamic_k_governor
 from app.retrieval.query_parser import query_parser
 from app.retrieval.ranker import CandidateChunk, CandidateDocument, Ranker
-from app.schemas.retrieval import ParsedQuery, SearchRequest, SearchResponse, SearchResult
+from app.schemas.retrieval import DynamicKDiagnostics, ParsedQuery, SearchRequest, SearchResponse, SearchResult
 from app.vectorstore.qdrant_store import qdrant_store
 from app.services.vector_db import VectorDBService
 
@@ -321,7 +322,18 @@ class HybridRetrievalEngine:
                     )
                 except Exception as e:
                     logger.warning("[ENGINE] Failed to generate preview URL: %s", e)
-                    result.preview_url = ""
+        # ── Step 9: Dynamic-K Diagnostics (if enabled) ────────────────────────
+        dynamic_k_diag: Optional[DynamicKDiagnostics] = None
+        if request.dynamic_k_enabled and raw_chunks:
+            try:
+                decision = dynamic_k_governor.decide(
+                    query=request.query,
+                    initial_chunks=raw_chunks,
+                    parsed_query=parsed,
+                )
+                dynamic_k_diag = DynamicKDiagnostics(**decision.to_dict())
+            except Exception as e:
+                logger.warning("[ENGINE] Dynamic K computation failed: %s", e)
 
         latency_ms = (time.monotonic() - t0) * 1000
 
@@ -333,6 +345,7 @@ class HybridRetrievalEngine:
             page=page,
             limit=limit,
             latency_ms=round(latency_ms, 2),
+            dynamic_k=dynamic_k_diag,
         )
 
     async def parse_only(self, query: str) -> ParsedQuery:

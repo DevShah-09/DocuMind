@@ -4,22 +4,33 @@ chat.py — LLM-Powered RAG Chat Endpoint
 POST /chat
 
 Pipeline:
-  1. Parse user query (structured filters + semantic query) via QueryParser
-  2. Embed + vector-search Qdrant for the most relevant document chunks
-  3. Assemble chunks into a compact context string (with citations)
-  4. Call Qwen 2.5 VL 72B Instruct via OpenRouter to generate a grounded answer
-  5. Return ChatResponse { answer, sources, parsed_query, latency_ms }
+  1.  Parse user query (structured filters + semantic query) via QueryParser
+  2.  Calculate Query Complexity Score (C_q) — deterministic, no LLM
+  3.  Embed + vector-search Qdrant for an initial probe batch
+  4.  Calculate Retrieval Confidence Score (R_c) from the probe results
+  5.  Run the Dynamic Top-K controller to determine the final K
+  6.  Expand retrieval if recommended_k > initial probe size
+  7.  Apply Document Diversity Guard (target_documents × chunks_per_document)
+  8.  Assemble chunks into a compact context string (with citations)
+  9.  Call Qwen 2.5 VL 72B Instruct via OpenRouter to generate a grounded answer
+  10. Return ChatResponse { answer, sources, parsed_query, latency_ms, dynamic_k }
 
 Security:
   - Requires valid Supabase JWT (get_current_user)
-  - user_id scopes every Qdrant query — users never see each other's documents
+  - user_id scopes EVERY Qdrant query — users never see each other's documents
+  - user_id is re-applied on every expansion search; never relaxed
+
+Observability:
+  - Structured retrieval telemetry is logged at INFO level (no document content,
+    no user query text in production log lines — privacy-conscious by default)
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from typing import Dict, List
+from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from openai import OpenAI
@@ -27,12 +38,14 @@ from openai import OpenAI
 from app.core.config import settings
 from app.core.security import get_current_user
 from app.embeddings.embedding_service import embedding_service
+from app.retrieval.dynamic_k import dynamic_k_governor
 from app.retrieval.query_parser import query_parser
 from app.retrieval.hybrid_engine import _is_conversational_query
 from app.schemas.retrieval import (
     ChatRequest,
     ChatResponse,
     ChatSource,
+    DynamicKDiagnostics,
     ParsedQuery,
 )
 from app.vectorstore.qdrant_store import qdrant_store
@@ -43,9 +56,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Chat"])
 
 # ── Constants ────────────────────────────────────────────────────────────────────
-MAX_CONTEXT_CHARS = 14000
+MAX_CONTEXT_CHARS   = 14_000
 MAX_CHUNKS_IN_CONTEXT = 16
-CHAT_MODEL = "qwen/qwen2.5-vl-72b-instruct"
+CHAT_MODEL          = "qwen/qwen2.5-vl-72b-instruct"
+
+# Initial probe size when dynamic-K is enabled.
+# Small enough to be cheap, large enough for R_c to be meaningful.
+DYNAMIC_K_PROBE_SIZE = 6
 
 # ── OpenRouter client ──────────────────────────────────────────────────────────
 _llm_client = OpenAI(
@@ -123,6 +140,52 @@ def _call_llm(user_query: str, context: str) -> str:
     return response.choices[0].message.content or ""
 
 
+def _log_retrieval_telemetry(
+    *,
+    user_id: str,
+    initial_k: int,
+    final_k: int,
+    c_q: float,
+    r_c: float,
+    unique_chunks: int,
+    distinct_docs: int,
+    evidence_coverage: float,
+    retrieval_latency_ms: float,
+    total_latency_ms: float,
+    stop_reason: str,
+    dynamic_k_enabled: bool,
+) -> None:
+    """
+    Emit a single structured telemetry log line per request.
+
+    Privacy contract:
+      - No document text or chunk content is logged.
+      - No full query text is logged (privacy-by-default).
+      - user_id is included for operational debugging; redact at log sink if needed.
+    """
+    logger.info(
+        "[CHAT_TELEMETRY] user=%s dynamic_k=%s "
+        "c_q=%.3f r_c=%.3f "
+        "initial_k=%d final_k=%d "
+        "unique_chunks=%d distinct_docs=%d "
+        "evidence=%.3f "
+        "retrieval_ms=%.1f total_ms=%.1f "
+        "stop_reason=%s",
+        user_id,
+        dynamic_k_enabled,
+        c_q,
+        r_c,
+        initial_k,
+        final_k,
+        unique_chunks,
+        distinct_docs,
+        evidence_coverage,
+        retrieval_latency_ms,
+        total_latency_ms,
+        stop_reason,
+    )
+
+
 # ── POST /chat ─────────────────────────────────────────────────────────────────
 
 @router.post("/chat", response_model=ChatResponse, summary="LLM-powered RAG chat")
@@ -136,11 +199,13 @@ async def chat(
     The pipeline:
       1. Parses query into structured filters + semantic embedding
       2. Retrieves the most relevant document chunks from Qdrant
+         using Confidence-Aware Dynamic Top-K selection
       3. Feeds chunks as context to Qwen 2.5 VL 72B
       4. Returns a natural-language answer with source citations
     """
     import asyncio
 
+    # ── 0. Auth check ──────────────────────────────────────────────────────────
     user_id = current_user.get("sub")
     if not user_id:
         raise HTTPException(
@@ -150,7 +215,7 @@ async def chat(
 
     t0 = time.monotonic()
 
-    # 0. Greetings shortcut
+    # ── 1. Greeting shortcut ───────────────────────────────────────────────────
     if _is_conversational_query(request.query):
         return ChatResponse(
             answer=_GREETING_REPLY,
@@ -160,18 +225,18 @@ async def chat(
         )
 
     try:
-        # 1 & 2. Parse query & Embed query in PARALLEL via asyncio.gather
+        # ── 2. Parse query & embed in parallel ────────────────────────────────
         parsed_task = query_parser.parse(request.query)
-        embed_task = embedding_service.embed_query(request.query)
-        
+        embed_task  = embedding_service.embed_query(request.query)
+
         parsed, query_vector = await asyncio.gather(parsed_task, embed_task)
-        
-        # If semantic query was extracted clean, re-embed only if different
+
+        # Re-embed cleaned semantic query if it differs from raw query
         if parsed.semantic_query and parsed.semantic_query != request.query:
             query_vector = await embedding_service.embed_query(parsed.semantic_query)
 
-        # 3. Build filters
-        filters: Dict = {}
+        # ── 3. Build metadata filters ─────────────────────────────────────────
+        filters: Dict[str, Any] = {}
         if parsed.document_type:
             filters["document_type"] = parsed.document_type
         if parsed.year is not None:
@@ -179,32 +244,38 @@ async def chat(
         if parsed.month:
             filters["month"] = parsed.month
 
-        # 4. Vector search with strict metadata filters
+        # ── 4. Initial probe retrieval ─────────────────────────────────────────
+        t_retrieval_start = time.monotonic()
+        dynamic_k_diag: Optional[DynamicKDiagnostics] = None
+
+        probe_limit = DYNAMIC_K_PROBE_SIZE if request.dynamic_k_enabled else request.limit * 4
+
         raw_chunks = await qdrant_store.search_chunks(
             query_vector=query_vector,
-            user_id=user_id,
+            user_id=user_id,           # ← user_id ALWAYS applied
             filters=filters,
-            limit=request.limit * 4,
+            limit=probe_limit,
             score_threshold=request.score_threshold,
         )
 
-        # 4a. If specific document_type filter returned nothing, retry without document_type filter
+        # ── 4a. Retry without doc-type filter if probe returned nothing ────────
         if not raw_chunks and parsed.document_type:
-            logger.info("[CHAT] No chunks for document_type '%s', retrying un-filtered search", parsed.document_type)
-            relaxed_filters = {k: v for k, v in filters.items() if k != "document_type"}
+            logger.info(
+                "[CHAT] No chunks for document_type=%r; retrying without type filter",
+                parsed.document_type,
+            )
+            relaxed = {k: v for k, v in filters.items() if k != "document_type"}
             raw_chunks = await qdrant_store.search_chunks(
                 query_vector=query_vector,
-                user_id=user_id,
-                filters=relaxed_filters,
-                limit=request.limit * 4,
+                user_id=user_id,       # ← user_id ALWAYS applied
+                filters=relaxed,
+                limit=probe_limit,
                 score_threshold=request.score_threshold,
             )
 
-        logger.info("[CHAT] %d raw chunks retrieved for user=%s", len(raw_chunks), user_id)
-
-        # 4b. Legacy fallback
+        # ── 4b. Legacy collection fallback ────────────────────────────────────
         if not raw_chunks:
-            vdb = VectorDBService()
+            vdb    = VectorDBService()
             legacy = await vdb.search(
                 query=parsed.semantic_query or request.query,
                 limit=request.limit,
@@ -212,64 +283,126 @@ async def chat(
             )
 
             class _FakeChunk:
-                def __init__(self, hit):
+                def __init__(self, hit: Any) -> None:
                     self.score = hit.score
                     p = hit.payload or {}
                     self.payload = {
-                        "document_id": str(hit.id),
-                        "filename": p.get("original_name", "document"),
+                        "document_id":   str(hit.id),
+                        "filename":      p.get("original_name", "document"),
                         "document_type": p.get("category", "document"),
-                        "text": p.get("text_content", ""),
-                        "page_number": 1,
-                        "chunk_index": 0,
-                        "summary": p.get("summary", ""),
-                        "year": None,
-                        "month": None,
-                        "bucket_path": p.get("bucket_path", ""),
+                        "text":          p.get("text_content", ""),
+                        "page_number":   1,
+                        "chunk_index":   0,
+                        "summary":       p.get("summary", ""),
+                        "year":          None,
+                        "month":         None,
+                        "bucket_path":   p.get("bucket_path", ""),
                     }
 
             raw_chunks = [_FakeChunk(h) for h in legacy]
-            logger.info("[CHAT] Legacy fallback: %d chunks", len(raw_chunks))
+            logger.info("[CHAT] Legacy fallback: %d chunks for user=%s", len(raw_chunks), user_id)
 
-        # 5. Collect ALL top chunks per document (important for summarization)
-        #    — group by doc_id, keep top chunks by score, then sort across all
-        from collections import defaultdict
-        doc_chunks: Dict[str, list] = defaultdict(list)
-        for chunk in raw_chunks:
-            p = chunk.payload or {}
-            doc_id = p.get("document_id", "")
-            if not doc_id:
-                continue
-            doc_chunks[doc_id].append(chunk)
+        initial_k_fetched = len(raw_chunks)
+        logger.info("[CHAT] Probe: %d raw chunks for user=%s", initial_k_fetched, user_id)
 
-        # For each document, keep up to 4 best chunks; then flatten and re-sort
-        flattened = []
-        for doc_id, chunks in doc_chunks.items():
-            top4 = sorted(chunks, key=lambda c: c.score, reverse=True)[:4]
-            flattened.extend(top4)
+        # ── 5. Dynamic K decision ──────────────────────────────────────────────
+        if request.dynamic_k_enabled and raw_chunks:
+            decision = dynamic_k_governor.decide(
+                query=request.query,
+                initial_chunks=raw_chunks,
+                parsed_query=parsed,
+            )
+            dynamic_k_diag = DynamicKDiagnostics(**decision.to_dict())
+            stop_reason    = "sufficient_evidence"
 
-        top_chunks = sorted(flattened, key=lambda c: c.score, reverse=True)[
-            : request.limit * 4  # allow more chunks so context is richer
-        ]
+            # ── 6. Expand retrieval if recommended_k > probe size ──────────────
+            if decision.recommended_k > len(raw_chunks):
+                fetch_limit = decision.recommended_k * 2
+                logger.info(
+                    "[CHAT] Expanding retrieval: recommended_k=%d, fetching up to %d chunks",
+                    decision.recommended_k, fetch_limit,
+                )
+                expanded = await qdrant_store.search_chunks(
+                    query_vector=query_vector,
+                    user_id=user_id,   # ← user_id ALWAYS applied on expansion
+                    filters=filters if raw_chunks else {},
+                    limit=fetch_limit,
+                    score_threshold=request.score_threshold,
+                )
+                if expanded:
+                    raw_chunks  = expanded
+                    stop_reason = "max_k_reached" if len(expanded) < fetch_limit else "sufficient_evidence"
 
-        # 6. Check intent: Does the user explicitly ask a question/summary/explanation, or just want to fetch/find documents?
+            # ── 7. Document Diversity Guard ────────────────────────────────────
+            doc_chunks: Dict[str, list] = defaultdict(list)
+            for chunk in raw_chunks:
+                did = (chunk.payload or {}).get("document_id", "")
+                if did:
+                    doc_chunks[did].append(chunk)
+
+            sorted_docs = sorted(
+                doc_chunks.items(),
+                key=lambda item: max((c.score for c in item[1]), default=0.0),
+                reverse=True,
+            )
+
+            best_doc_score = max(
+                (max(c.score for c in item[1]) for item in sorted_docs),
+                default=0.0,
+            )
+            min_doc_score = max(request.score_threshold, best_doc_score * 0.65)
+
+            selected_chunks: list = []
+            selected_doc_count = 0
+            for doc_id, chunks_for_doc in sorted_docs:
+                top_score = max((c.score for c in chunks_for_doc), default=0.0)
+                if top_score < min_doc_score:
+                    continue
+                if selected_doc_count >= decision.target_documents:
+                    break
+                if len(selected_chunks) >= decision.recommended_k:
+                    break
+                best_for_doc = sorted(chunks_for_doc, key=lambda c: c.score, reverse=True)
+                selected_chunks.extend(best_for_doc[: decision.chunks_per_document])
+                selected_doc_count += 1
+
+            top_chunks = sorted(selected_chunks, key=lambda c: c.score, reverse=True)[: decision.recommended_k]
+
+        else:
+            # ── Static fallback: top-4 per document up to limit * 4 ───────────
+            doc_chunks_static: Dict[str, list] = defaultdict(list)
+            for chunk in raw_chunks:
+                did = (chunk.payload or {}).get("document_id", "")
+                if did:
+                    doc_chunks_static[did].append(chunk)
+
+            flattened: list = []
+            for _, chunks_for_doc in doc_chunks_static.items():
+                flattened.extend(sorted(chunks_for_doc, key=lambda c: c.score, reverse=True)[:4])
+
+            top_chunks  = sorted(flattened, key=lambda c: c.score, reverse=True)[: request.limit * 4]
+            stop_reason = "static_k"
+
+        retrieval_latency_ms = round((time.monotonic() - t_retrieval_start) * 1000, 2)
+
+        # ── 8. Determine intent: analysis vs. document fetch ──────────────────
         q_lower = request.query.lower().strip()
-        analysis_keywords = {
-            "summarize", "summary", "explain", "what is", "what are", "how much", 
+        _analysis_kw = {
+            "summarize", "summary", "explain", "what is", "what are", "how much",
             "total", "details", "compare", "why", "list all", "extract", "reading",
-            "calculate", "who is", "when did", "date of"
+            "calculate", "who is", "when did", "date of",
         }
-        requires_llm_answer = any(kw in q_lower for kw in analysis_keywords) or q_lower.endswith("?")
+        requires_llm = any(kw in q_lower for kw in _analysis_kw) or q_lower.endswith("?")
 
-        # 7. Build sources — one entry per unique document (best-scoring chunk metadata)
-        seen_source_docs: Dict[str, bool] = {}
+        # ── 9. Build source list ───────────────────────────────────────────────
+        seen_doc_ids: Dict[str, bool] = {}
         sources: List[ChatSource] = []
         for chunk in top_chunks:
-            p = chunk.payload or {}
+            p      = chunk.payload or {}
             doc_id = p.get("document_id", "")
-            if not doc_id or doc_id in seen_source_docs:
+            if not doc_id or doc_id in seen_doc_ids:
                 continue
-            seen_source_docs[doc_id] = True
+            seen_doc_ids[doc_id] = True
             sources.append(ChatSource(
                 document_id=doc_id,
                 filename=p.get("filename", p.get("original_name", "document")),
@@ -281,44 +414,67 @@ async def chat(
                 preview_url="",
             ))
 
-        # Cap sources to top 3 matches
-        sources = sources[:3]
+        sources = sources[: max(5, request.limit)]
 
-        # 8. If pure document retrieval (e.g. "give me aadhar card", "show bank statement"), return document cards without full LLM generation
-        if not requires_llm_answer:
+        # ── 10. Generate answer ────────────────────────────────────────────────
+        if not requires_llm:
             if sources:
-                top_doc = sources[0]
-                top_score = int(round(top_doc.score * 100))
-                answer = f"Found {len(sources)} matching document{'s' if len(sources) > 1 else ''} for \"{request.query}\". Best match: **{top_doc.filename}** ({top_score}% relevance)."
+                best = sources[0]
+                pct  = int(round(best.score * 100))
+                answer = (
+                    f"Found {len(sources)} matching document"
+                    f"{'s' if len(sources) > 1 else ''} for \"{request.query}\". "
+                    f"Best match: **{best.filename}** ({pct}% relevance)."
+                )
             else:
-                answer = f"No documents matched \"{request.query}\". Try a different query or upload more documents."
+                answer = (
+                    f"No documents matched \"{request.query}\". "
+                    "Try a different query or upload more documents."
+                )
         else:
-            # Full LLM RAG call when explicitly asked (summarize, explain, questions)
-            context_tuples = []
-            for chunk in top_chunks:
-                p = chunk.payload or {}
-                context_tuples.append((
-                    p.get("filename", p.get("original_name", "document")),
-                    p.get("document_type", "document"),
-                    p.get("text", p.get("text_content", "")),
-                    p.get("page_number", 1),
-                ))
-
+            context_tuples = [
+                (
+                    (chunk.payload or {}).get("filename", "document"),
+                    (chunk.payload or {}).get("document_type", "document"),
+                    (chunk.payload or {}).get("text", (chunk.payload or {}).get("text_content", "")),
+                    (chunk.payload or {}).get("page_number", 1),
+                )
+                for chunk in top_chunks
+            ]
             context_str = _build_context(context_tuples)
-            loop = asyncio.get_event_loop()
-            answer = await loop.run_in_executor(None, _call_llm, request.query, context_str)
+            loop        = asyncio.get_event_loop()
+            answer      = await loop.run_in_executor(None, _call_llm, request.query, context_str)
 
-        latency_ms = round((time.monotonic() - t0) * 1000, 2)
-        logger.info(
-            "[CHAT] user=%s answered in %.0fms, sources=%d",
-            user_id, latency_ms, len(sources),
+        total_latency_ms = round((time.monotonic() - t0) * 1000, 2)
+
+        # ── 11. Structured telemetry ──────────────────────────────────────────
+        # Compute distinct doc count from top_chunks for telemetry
+        distinct_doc_ids = {
+            (c.payload or {}).get("document_id", "")
+            for c in top_chunks
+            if (c.payload or {}).get("document_id")
+        }
+        _log_retrieval_telemetry(
+            user_id=user_id,
+            initial_k=initial_k_fetched,
+            final_k=len(top_chunks),
+            c_q=dynamic_k_diag.c_q       if dynamic_k_diag else 0.0,
+            r_c=dynamic_k_diag.r_c       if dynamic_k_diag else 0.0,
+            unique_chunks=len(top_chunks),
+            distinct_docs=len(distinct_doc_ids),
+            evidence_coverage=dynamic_k_diag.evidence_alignment if dynamic_k_diag else 0.0,
+            retrieval_latency_ms=retrieval_latency_ms,
+            total_latency_ms=total_latency_ms,
+            stop_reason=stop_reason,
+            dynamic_k_enabled=request.dynamic_k_enabled,
         )
 
         return ChatResponse(
             answer=answer,
             sources=sources,
             parsed_query=parsed,
-            latency_ms=latency_ms,
+            latency_ms=total_latency_ms,
+            dynamic_k=dynamic_k_diag,
         )
 
     except Exception as exc:

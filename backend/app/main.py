@@ -21,6 +21,18 @@ app = FastAPI(
     version="1.0.0",
 )
 
+@app.on_event("startup")
+async def startup_event():
+    logger.info("[STARTUP] Pre-loading local BGE embedding model & classifier prototype cache...")
+    try:
+        from app.embeddings.embedding_service import embedding_service
+        from app.services.local_classifier import local_classifier
+        embedding_service._initialize()
+        local_classifier._ensure_cache()
+        logger.info("[STARTUP] BGE Model & prototype cache ready in RAM!")
+    except Exception as e:
+        logger.error("[STARTUP] Pre-load error: %s", e)
+
 # ── Static file mount (local storage fallback) ─────────────────────────────────
 import os as _os
 _os.makedirs("local_storage", exist_ok=True)

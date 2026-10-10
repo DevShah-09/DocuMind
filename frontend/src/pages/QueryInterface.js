@@ -285,6 +285,7 @@ const QueryInterface = () => {
         content: aiContent,
         resultCount: sources.length,
         parsedQuery: data.parsed_query,
+        dynamicK: data.dynamic_k,
         latency: data.latency_ms,
         timestamp: new Date().toLocaleTimeString(),
       };
@@ -433,6 +434,15 @@ const QueryInterface = () => {
                                    className="bg-slate-50 dark:bg-slate-800 text-slate-600
                                               dark:text-slate-300 border-slate-200 dark:border-slate-700 text-xs">
                               {message.parsedQuery.year}
+                            </Badge>
+                          )}
+                          {message.dynamicK && (
+                            <Badge variant="outline"
+                                   title={`Complexity: ${message.dynamicK.c_q} | Confidence: ${Math.round(message.dynamicK.r_c * 100)}% | Knee Cliff: ${message.dynamicK.knee_gap} @ idx ${message.dynamicK.knee_index}`}
+                                   className="bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-400
+                                              border-emerald-200 dark:border-emerald-800 text-xs flex items-center gap-1 cursor-help">
+                              <span>🎯 Adaptive K: {message.dynamicK.recommended_k}</span>
+                              <span className="text-[10px] opacity-75">({message.dynamicK.target_documents} doc{message.dynamicK.target_documents > 1 ? 's' : ''})</span>
                             </Badge>
                           )}
                           {message.latency && (

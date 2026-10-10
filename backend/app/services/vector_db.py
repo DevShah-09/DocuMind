@@ -30,13 +30,16 @@ class VectorDBService:
 
     def _ensure_collection_exists(self):
         """Creates the Qdrant collection and payload indexes if they don't already exist."""
-        existing = [c.name for c in self.client.get_collections().collections]
-        if self.collection_name not in existing:
-            self.client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE),
-            )
-            print(f"[QDRANT] Created collection: '{self.collection_name}'")
+        try:
+            existing = [c.name for c in self.client.get_collections().collections]
+            if self.collection_name not in existing:
+                self.client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE),
+                )
+                print(f"[QDRANT] Created collection: '{self.collection_name}'")
+        except Exception as e:
+            print(f"[QDRANT] Note: Collection check/creation skipped or already exists: {e}")
 
         # Ensure payload indexes exist (idempotent — safe to call on existing collections)
         index_specs = [

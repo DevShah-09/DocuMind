@@ -1,0 +1,54 @@
+[
+  {
+    "strategy": "fixed_k5",
+    "n_queries": 10,
+    "recall@10": 1.0,
+    "mrr": 1.0,
+    "ndcg@10": 1.0,
+    "avg_faithfulness_proxy": 0.5518,
+    "avg_k": 5.0,
+    "chunk_reduction_vs_k12_pct": 58.33,
+    "empty_result_rate": 0.0,
+    "retrieval_failure_rate": 0.0,
+    "avg_retrieval_latency_ms": 0.003
+  },
+  {
+    "strategy": "fixed_k12",
+    "n_queries": 10,
+    "recall@10": 1.0,
+    "mrr": 1.0,
+    "ndcg@10": 1.0,
+    "avg_faithfulness_proxy": 0.5518,
+    "avg_k": 12.0,
+    "chunk_reduction_vs_k12_pct": 0.0,
+    "empty_result_rate": 0.0,
+    "retrieval_failure_rate": 0.0,
+    "avg_retrieval_latency_ms": 0.003
+  },
+  {
+    "strategy": "complexity_only",
+    "n_queries": 10,
+    "recall@10": 1.0,
+    "mrr": 1.0,
+    "ndcg@10": 1.0,
+    "avg_faithfulness_proxy": 0.5881,
+    "avg_k": 6.1,
+    "chunk_reduction_vs_k12_pct": 49.17,
+    "empty_result_rate": 0.0,
+    "retrieval_failure_rate": 0.0,
+    "avg_retrieval_latency_ms": 0.161
+  },
+  {
+    "strategy": "full_dynamic_k",
+    "n_queries": 10,
+    "recall@10": 1.0,
+    "mrr": 1.0,
+    "ndcg@10": 1.0,
+    "avg_faithfulness_proxy": 0.5658,
+    "avg_k": 5.2,
+    "chunk_reduction_vs_k12_pct": 56.67,
+    "empty_result_rate": 0.0,
+    "retrieval_failure_rate": 0.0,
+    "avg_retrieval_latency_ms": 0.104
+  }
+]

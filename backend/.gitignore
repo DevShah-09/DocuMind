@@ -43,5 +43,10 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Debug / temp scripts
-test_*.py
+# Debug / temp scripts in backend root
+/test_*.py
+!tests/
+!tests/**
+tests/**/__pycache__/
+tests/**/*.py[cod]
+tests/**/.pytest_cache/

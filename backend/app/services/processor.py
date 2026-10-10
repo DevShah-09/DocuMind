@@ -9,6 +9,8 @@ import fitz  # PyMuPDF
 from app.services.vision_model import VisionProcessor
 from app.services.cloud_storage import S3StorageService
 from app.services.vector_db import VectorDBService
+from app.services.local_classifier import local_classifier, SCORE_THRESHOLD, MARGIN_THRESHOLD
+from app.retrieval.query_parser import DOC_TYPE_MAP
 
 MONTH_MAP = {
     "jan": "January", "feb": "February", "mar": "March", "apr": "April",
@@ -25,6 +27,63 @@ _MONTH_RE = re.compile(
     r"|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b",
     re.IGNORECASE,
 )
+
+_easyocr_reader = None
+
+def get_easyocr_reader():
+    global _easyocr_reader
+    if _easyocr_reader is None:
+        try:
+            import easyocr
+            print("[PROCESSOR] Lazy loading EasyOCR model (CPU mode)...")
+            _easyocr_reader = easyocr.Reader(['en'], gpu=False)
+        except Exception as e:
+            print(f"[PROCESSOR] Failed to load EasyOCR: {e}")
+            _easyocr_reader = False
+    return _easyocr_reader if _easyocr_reader is not False else None
+
+def extract_text_with_easyocr(images_base64: list[str]) -> str:
+    reader = get_easyocr_reader()
+    if not reader:
+        return ""
+    try:
+        all_text = []
+        for b64 in images_base64:
+            img_bytes = base64.b64decode(b64)
+            results = reader.readtext(img_bytes, detail=0)
+            if results:
+                all_text.append(" ".join(results))
+        return "\n\n".join(all_text).strip()
+    except Exception as e:
+        print(f"[PROCESSOR] EasyOCR extraction error: {e}")
+        return ""
+
+AMBIGUOUS_KEYWORDS = {"mobile", "gas", "water", "bank", "tax", "bill", "pan", "medical", "electric", "statement", "policy"}
+
+def fallback_classify_from_text(text: str, clf_result=None) -> tuple[str, int]:
+    """
+    When cloud Vision/Text LLM API fails (e.g. 402 Insufficient Credits),
+    classify using explicit content keyword scanning or calibrated local BGE prediction.
+    """
+    text_lower = text.lower()
+    
+    # Check for Student / College Identity Card specific terms
+    student_id_terms = ["identity card", "student id", "college of engineering", "roll no", "enrollment no", "student identity card"]
+    if any(term in text_lower for term in student_id_terms):
+        return "student_id_card", 85
+
+    # 1. High-precision content keyword scanning against DOC_TYPE_MAP phrases
+    for phrase, slug in sorted(DOC_TYPE_MAP.items(), key=lambda x: -len(x[0])):
+        if phrase in AMBIGUOUS_KEYWORDS:
+            continue
+        if phrase in text_lower:
+            return slug, 85
+
+    # 2. Local BGE top prediction check (requires score >= 0.58 AND margin >= 0.05)
+    if clf_result and clf_result.top_score >= 0.58 and clf_result.margin >= 0.05:
+        return clf_result.category, round(clf_result.top_score * 100)
+
+    return "miscellaneous", 50
 
 class DocumentOrchestrator:
     def __init__(self):
@@ -68,14 +127,9 @@ class DocumentOrchestrator:
                         full_text.append(t)
                 extracted_text = "\n\n".join(full_text).strip()
 
-                # If text is minimal (<50 words), treat as scanned PDF and render images
+                # If text is short (<50 words), render page images for Vision LLM backup
+                # DO NOT erase extracted_text if text exists!
                 if len(extracted_text.split()) < 50:
-                    extracted_text = ""
-                    # 2-page, 1.25x first-pass optimization:
-                    # - Reduced from 3 pages → max 2 pages (less payload to the VL model)
-                    # - Reduced from 1.5x → 1.25x zoom (~116 DPI; balances legibility vs size)
-                    # This is a page-count + resolution change only — model is unchanged.
-                    # Benchmark actual latency before considering further optimizations (e.g. 7B VL).
                     max_pages = min(2, len(doc))
                     for page_num in range(max_pages):
                         page = doc.load_page(page_num)
@@ -90,12 +144,67 @@ class DocumentOrchestrator:
             # Direct Image upload
             images_base64.append(base64.b64encode(file_content).decode('utf-8'))
 
-        # Step 2: Analyze Document (Fast Text Path vs Vision LLM Path)
+        # Step 2: Analyze Document
+        # Path A — Digital text PDF: try local BGE classifier first.
+        #   If confident (score >= threshold AND margin >= threshold) → skip Qwen-72B entirely.
+        #   If uncertain → fall through to Qwen-72B for full analysis.
+        # Path B — Scanned/image PDF: always use Qwen-72B VL (needs vision).
         if extracted_text:
-            print(f"[PROCESSOR] Fast path: Digital text PDF detected ({len(extracted_text.split())} words). Skipping Vision LLM!")
-            analysis_json_str = await self.vision.analyze_text_document(extracted_text, original_name)
+            print(f"[PROCESSOR] Fast path: Digital text PDF ({len(extracted_text.split())} words). Running local BGE classifier...")
+
+            clf_result = local_classifier.classify(extracted_text, max_chars=2500)
+            print(
+                f"[CLASSIFIER] top={clf_result.category} score={clf_result.top_score:.4f} "
+                f"second={clf_result.second_score:.4f} margin={clf_result.margin:.4f} "
+                f"→ {'LOCAL ACCEPT' if clf_result.accepted else 'FALLBACK→Qwen-72B'}"
+            )
+
+            if clf_result.accepted:
+                # Build a minimal analysis JSON matching Qwen's schema.
+                print(f"[PROCESSOR] Local classification accepted: {clf_result.category} (no API call)")
+                analysis_json_str = json.dumps({
+                    "is_blur": False,
+                    "blur_reason": None,
+                    "category": clf_result.category,
+                    "confidence": round(clf_result.top_score * 100),
+                    "metadata": {},
+                    "summary": f"Document classified locally as {clf_result.category} "
+                               f"(BGE score={clf_result.top_score:.2f}, margin={clf_result.margin:.2f}).",
+                    "text": extracted_text,
+                    "_classifier": "local_bge",   # diagnostic tag
+                })
+            else:
+                # Uncertain — delegate to Qwen-72B for full analysis
+                print(f"[PROCESSOR] Classifier uncertain — calling Qwen-72B for full analysis...")
+                analysis_json_str = await self.vision.analyze_text_document(extracted_text, original_name)
+
+                # Graceful degradation: if Qwen-72B fails (e.g. 402 payment required, timeout)
+                try:
+                    parsed_check = json.loads(analysis_json_str)
+                    if parsed_check.get("category") == "miscellaneous":
+                        fb_category, fb_conf = fallback_classify_from_text(extracted_text, clf_result)
+                        if fb_category != "miscellaneous":
+                            print(
+                                f"[PROCESSOR] Qwen API failed/miscellaneous — using content fallback: "
+                                f"{fb_category} ({fb_conf}% conf, BGE score={clf_result.top_score:.4f})"
+                            )
+                            analysis_json_str = json.dumps({
+                                "is_blur": False,
+                                "blur_reason": None,
+                                "category": fb_category,
+                                "confidence": fb_conf,
+                                "metadata": {},
+                                "summary": f"Classified as {fb_category} based on document text content (BGE score={clf_result.top_score:.2f}).",
+                                "text": extracted_text,
+                                "_classifier": "content_bge_fallback",
+                            })
+                        else:
+                            print(f"[PROCESSOR] Content fallback uncertain — retaining miscellaneous.")
+                except (json.JSONDecodeError, Exception) as err:
+                    print(f"[PROCESSOR] Degradation parse error: {err}")
+
         elif images_base64:
-            print(f"[PROCESSOR] Scanned path: Calling Vision LLM (Qwen 72B) for {len(images_base64)} image(s)...")
+            print(f"[PROCESSOR] Scanned image/PDF path ({len(images_base64)} image(s)). Calling fast Vision LLM (Gemini 2.5 Flash)...")
             analysis_json_str = await self.vision.analyze_document(images_base64)
         else:
             raise ValueError("No extractable content or images found in the document.")
@@ -120,14 +229,35 @@ class DocumentOrchestrator:
             raise ValueError(f"Image Quality Issue: {reason} Please re-upload a clearer version.")
 
         category = analysis.get("category", "miscellaneous")
-        confidence = analysis.get("confidence", 0)
+        raw_conf = analysis.get("confidence", 0)
+        try:
+            conf_val = float(raw_conf)
+            if 0.0 < conf_val <= 1.0:
+                confidence = round(conf_val * 100)
+            else:
+                confidence = round(conf_val)
+        except Exception:
+            confidence = 0
         metadata_dict = analysis.get("metadata", {})
         summary = analysis.get("summary", "")
         text_content = analysis.get("text", "")
 
-        # Fallback if text is empty so vector isn't empty
-        if not text_content:
-            text_content = original_name
+        # Self-Learning Dynamic Prototype Feedback Loop:
+        # When Qwen-72B or Vision LLM classifies a document, automatically train the local BGE model
+        # so future uploads of this document type are recognized locally (0 cost, ultra-fast).
+        # NEVER learn from fallback heuristic guesses!
+        is_fallback = analysis.get("_classifier") in ("content_bge_fallback", "easyocr_bge_content_scan")
+        if category and category != "miscellaneous" and text_content and not is_fallback:
+            local_classifier.learn_prototype(category, text_content)
+
+        # Fallback if text is empty or short so chunker doesn't discard it (<50 chars)
+        if not text_content or len(text_content.strip()) < 50:
+            text_content = (
+                f"Document Name: {original_name}\n"
+                f"Category: {category}\n"
+                f"Summary: {summary or original_name}\n"
+                f"Content: {text_content or original_name}"
+            )
 
         # Step 3: Storage in Local Disk (USE ENCRYPTED CONTENT)
         file_key = f"{doc_id}-{original_name}"
