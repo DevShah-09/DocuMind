@@ -1,0 +1,7 @@
+strategy,strategy_label,mean_selected_k,mean_actual_chunks,precision_at_k,recall_at_k,f1_at_k,mrr,ndcg_at_k,hit_rate_at_k,mean_context_tokens,token_reduction_pct,chunk_reduction_pct,delta_recall,mean_latency_ms,p50_latency_ms,p90_latency_ms,p95_latency_ms,p99_latency_ms,relative_latency_change_pct,expansion_rate_pct,unproductive_expansion_pct,ood_false_positive_rate_pct,abstention_accuracy_pct
+fixed_k_baseline,Fixed-K Baseline (K=5),5.0,5.0,0.2724,0.8921,0.4065,0.8598,0.8218,0.981,175.5,0.0,0.0,0.0,7.26,6.71,9.46,9.97,10.63,0.0,0.0,0.0,100.0,0.0
+complexity_only,Complexity-Only Dynamic-K,4.08,4.08,0.3466,0.8492,0.4643,0.85,0.8031,0.9429,143.7,18.12,18.4,-0.0429,6.54,6.27,8.0,9.45,10.13,-9.92,0.0,0.0,100.0,0.0
+confidence_only,Confidence-Only Dynamic-K,9.92,9.92,0.1614,0.9619,0.2711,0.8625,0.8397,1.0,342.7,-95.27,-98.4,0.0698,7.0,6.58,8.04,8.96,12.86,-3.58,0.0,0.0,100.0,0.0
+normalized_demand,Full Dynamic-K (Normalized Demand),7.33,7.33,0.2068,0.9365,0.3316,0.8625,0.8352,1.0,255.1,-45.36,-46.6,0.0444,6.71,6.4,8.0,9.3,9.56,-7.58,0.0,0.0,100.0,0.0
+paper_formula,Research Paper Formula (gamma=5.0),11.26,11.26,0.1392,0.9619,0.2393,0.8625,0.8397,1.0,386.5,-120.23,-125.2,0.0698,6.51,6.33,7.52,7.91,8.21,-10.33,0.0,0.0,100.0,0.0
+improved_abstention,Improved OOD Abstention Variant,9.17,9.17,0.1736,0.9222,0.2693,0.8548,0.8211,0.9619,316.4,-80.28,-83.4,0.0301,6.73,6.45,8.05,8.99,11.43,-7.3,0.0,0.0,33.3,66.7

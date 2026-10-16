@@ -99,6 +99,10 @@ class DynamicKDiagnostics(BaseModel):
     knee_index: int = Field(..., description="1-based rank index immediately before the cliff")
     evidence_alignment: float = Field(..., description="Grounding match between query constraints and candidates")
     features: Dict[str, float] = Field(default_factory=dict, description="Normalized f1..f8 complexity features")
+    formula_mode: str = Field("normalized_demand", description="Evaluation formula mode")
+    is_abstained: bool = Field(False, description="Whether retrieval expansion was abstained due to sub-floor similarity")
+    abstention_reason: str = Field("", description="Reason for abstention if applicable")
+    stop_reason: str = Field("", description="Termination reason for K decision")
     explanation: str = Field("", description="Human-readable decision explanation")
 
 

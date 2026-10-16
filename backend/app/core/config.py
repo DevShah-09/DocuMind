@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     # ── Embeddings ────────────────────────────────────────────────────
     BGE_MODEL_NAME: str = "BAAI/bge-base-en-v1.5"
 
+    # ── Dynamic Top-K ──────────────────────────────────────────
+    DYNAMIC_K_FORMULA_MODE: str = "normalized_demand"  # "normalized_demand" | "paper"
+    DYNAMIC_K_SIMILARITY_FLOOR: float = 0.35
+    DYNAMIC_K_ENABLE_ABSTENTION: bool = True
+
     # ── OpenRouter / LLM ───────────────────────────────────────
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_URL: str = "https://openrouter.ai/api/v1"

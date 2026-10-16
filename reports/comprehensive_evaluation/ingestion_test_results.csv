@@ -1,0 +1,6 @@
+timestamp,test_name,status,severity,details
+2026-10-16T19:20:58.421276+00:00,unallowed_extension_exe_rejected,PASSED,HIGH,"HTTP 400: {""detail"":""File extension 'exe' not allowed. Must be one of {'pdf', 'jpeg', 'png', 'jpg'}""}"
+2026-10-16T19:20:58.425085+00:00,unallowed_extension_txt_rejected,PASSED,MEDIUM,"HTTP 400: {""detail"":""File extension 'txt' not allowed. Must be one of {'pdf', 'jpeg', 'png', 'jpg'}""}"
+2026-10-16T19:20:58.430211+00:00,empty_file_rejected,PASSED,HIGH,"HTTP 400: {""detail"":""Empty file uploaded.""}"
+2026-10-16T19:20:58.554480+00:00,oversized_file_rejected,PASSED,HIGH,"HTTP 400: {""detail"":""File too large. Maximum size is 20MB.""}"
+2026-10-16T19:20:58.922932+00:00,corrupted_pdf_safe_error_handling,PASSED,MEDIUM,HTTP 500: Handled without unhandled crash

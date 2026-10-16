@@ -415,5 +415,78 @@ class TestQueryParserFallback(unittest.TestCase):
         self.assertIsInstance(dec.recommended_k, int)
 
 
+# ── Formula Modes and OOD Abstention Suite ───────────────────────────────────
+
+class TestFormulaModesAndAbstention(unittest.TestCase):
+
+    def test_invalid_formula_mode_raises(self):
+        with self.assertRaises(ValueError):
+            TopKConfig(formula_mode="non_existent_mode")
+
+    def test_fixed_k_mode(self):
+        cfg = TopKConfig(formula_mode="fixed", fixed_k=7)
+        ctrl = DynamicTopKController(config=cfg)
+        dec = ctrl.decide("What is my PAN?", _high_conf_chunks())
+        self.assertEqual(dec.recommended_k, 7)
+        self.assertEqual(dec.stop_reason, "fixed_k_baseline")
+        self.assertEqual(dec.formula_mode, "fixed")
+
+    def test_complexity_only_mode(self):
+        cfg = TopKConfig(formula_mode="complexity_only", k_min=2, k_max=15)
+        ctrl = DynamicTopKController(config=cfg)
+        q_simple = "What is my PAN?"
+        q_complex = "Compare all bank statements 2022 to 2024 and analyze spending trends."
+        d_simple = ctrl.decide(q_simple, _high_conf_chunks())
+        d_complex = ctrl.decide(q_complex, _high_conf_chunks())
+        self.assertLess(d_simple.recommended_k, d_complex.recommended_k)
+        self.assertEqual(d_simple.stop_reason, "complexity_only_demand")
+
+    def test_confidence_only_mode(self):
+        cfg = TopKConfig(formula_mode="confidence_only", k_min=2, k_max=15)
+        ctrl = DynamicTopKController(config=cfg)
+        q = "Show my document."
+        d_high = ctrl.decide(q, _high_conf_chunks())
+        d_low = ctrl.decide(q, _low_conf_chunks())
+        self.assertGreaterEqual(d_low.recommended_k, d_high.recommended_k)
+        self.assertEqual(d_high.stop_reason, "confidence_only_demand")
+
+    def test_paper_formula_mode(self):
+        # K* = ceil(clip(K_min + (1 - R_c) * K_range + gamma * C_q, K_min, K_max))
+        cfg = TopKConfig(formula_mode="paper", k_min=2, k_max=15, gamma=5.0)
+        ctrl = DynamicTopKController(config=cfg)
+        dec = ctrl.decide("What is my PAN?", _high_conf_chunks())
+        self.assertGreaterEqual(dec.recommended_k, 2)
+        self.assertLessEqual(dec.recommended_k, 15)
+        self.assertEqual(dec.stop_reason, "paper_additive_formula")
+
+    def test_abstention_on_empty_chunks(self):
+        cfg = TopKConfig(enable_abstention=True, similarity_floor=0.35)
+        ctrl = DynamicTopKController(config=cfg)
+        dec = ctrl.decide("What is my electricity bill in 2024?", [])
+        self.assertTrue(dec.is_abstained)
+        self.assertEqual(dec.recommended_k, 2)
+        self.assertEqual(dec.stop_reason, "abstain_low_similarity_floor")
+        self.assertIn("Peak similarity", dec.abstention_reason)
+
+    def test_abstention_on_low_similarity_floor(self):
+        cfg = TopKConfig(enable_abstention=True, similarity_floor=0.40)
+        ctrl = DynamicTopKController(config=cfg)
+        low_noise_chunks = [_chunk(0.25, "d1"), _chunk(0.20, "d2")]
+        dec = ctrl.decide("Find alien spaceship document", low_noise_chunks)
+        self.assertTrue(dec.is_abstained)
+        self.assertEqual(dec.recommended_k, 2)
+        self.assertEqual(dec.stop_reason, "abstain_low_similarity_floor")
+
+    def test_no_abstention_when_disabled(self):
+        cfg = TopKConfig(enable_abstention=False, similarity_floor=0.40)
+        ctrl = DynamicTopKController(config=cfg)
+        low_noise_chunks = [_chunk(0.25, "d1"), _chunk(0.20, "d2")]
+        dec = ctrl.decide("Find alien spaceship document", low_noise_chunks)
+        self.assertFalse(dec.is_abstained)
+        # Without abstention, low confidence pushes demand up
+        self.assertGreater(dec.recommended_k, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
+

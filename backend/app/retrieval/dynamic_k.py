@@ -81,15 +81,30 @@ class DynamicKGovernor:
         k_max: int = K_MAX,
         k_range: int = K_RANGE,
         gamma: float = GAMMA,
+        formula_mode: Optional[str] = None,
+        similarity_floor: Optional[float] = None,
+        enable_abstention: Optional[bool] = None,
     ) -> None:
         self.k_min   = k_min
         self.k_max   = k_max
         self.k_range = k_range
         self.gamma   = gamma
 
+        from app.core.config import settings
+        cfg_mode = formula_mode or getattr(settings, "DYNAMIC_K_FORMULA_MODE", "normalized_demand")
+        cfg_floor = similarity_floor if similarity_floor is not None else getattr(settings, "DYNAMIC_K_SIMILARITY_FLOOR", 0.35)
+        cfg_abstain = enable_abstention if enable_abstention is not None else getattr(settings, "DYNAMIC_K_ENABLE_ABSTENTION", True)
+
         # Instantiate the new modular components with matching K bounds
         self._controller = DynamicTopKController(
-            config=TopKConfig(k_min=k_min, k_max=k_max),
+            config=TopKConfig(
+                k_min=k_min,
+                k_max=k_max,
+                gamma=gamma,
+                formula_mode=cfg_mode,
+                similarity_floor=cfg_floor,
+                enable_abstention=cfg_abstain,
+            ),
         )
         self._complexity = self._controller._complexity
         self._confidence = self._controller._confidence

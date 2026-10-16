@@ -318,10 +318,11 @@ async def chat(
                 parsed_query=parsed,
             )
             dynamic_k_diag = DynamicKDiagnostics(**decision.to_dict())
-            stop_reason    = "sufficient_evidence"
+            stop_reason    = decision.stop_reason or "sufficient_evidence"
 
-            # ── 6. Expand retrieval if recommended_k > probe size ──────────────
-            if decision.recommended_k > len(raw_chunks):
+            # ── 6. Expand retrieval if recommended_k > probe size and not abstained ──
+            can_expand = (decision.recommended_k > len(raw_chunks)) and (not getattr(decision, "is_abstained", False))
+            if can_expand:
                 fetch_limit = decision.recommended_k * 2
                 logger.info(
                     "[CHAT] Expanding retrieval: recommended_k=%d, fetching up to %d chunks",
@@ -350,6 +351,11 @@ async def chat(
                             combined_chunks.append(c)
                     raw_chunks  = combined_chunks
                     stop_reason = "max_k_reached" if len(expanded) < fetch_limit else "sufficient_evidence"
+            elif getattr(decision, "is_abstained", False):
+                logger.info(
+                    "[CHAT] Expansion abstained: %s",
+                    getattr(decision, "abstention_reason", "Low similarity floor"),
+                )
 
             # ── 7. Document Diversity Guard ────────────────────────────────────
             doc_chunks: Dict[str, list] = defaultdict(list)

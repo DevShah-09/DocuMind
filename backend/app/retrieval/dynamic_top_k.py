@@ -116,14 +116,22 @@ class TopKConfig:
     k_max:              int   = DEFAULT_K_MAX
     alpha:              float = DEFAULT_ALPHA
     beta:               float = DEFAULT_BETA
+    gamma:              float = 5.0
     coverage_penalty:   int   = DEFAULT_COVERAGE_PENALTY
     coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD
+    formula_mode:       str   = "normalized_demand"  # "normalized_demand" | "paper" | "complexity_only" | "confidence_only" | "fixed"
+    fixed_k:            int   = 5
+    similarity_floor:   float = 0.35
+    enable_abstention:  bool  = False
 
     def __post_init__(self) -> None:
         if self.k_min < 1:
             raise ValueError(f"k_min must be >= 1, got {self.k_min}")
         if self.k_max < self.k_min:
             raise ValueError(f"k_max ({self.k_max}) must be >= k_min ({self.k_min})")
+        valid_modes = {"normalized_demand", "paper", "complexity_only", "confidence_only", "fixed"}
+        if self.formula_mode not in valid_modes:
+            raise ValueError(f"formula_mode must be one of {valid_modes}, got {self.formula_mode!r}")
         # Auto-normalise alpha + beta
         ab_total = self.alpha + self.beta
         if ab_total <= 0:
@@ -153,6 +161,10 @@ class DynamicKDecision:
     knee_gap:           float
     knee_index:         int
     evidence_alignment: float
+    formula_mode:       str   = "normalized_demand"
+    is_abstained:       bool  = False
+    abstention_reason:  str   = ""
+    stop_reason:        str   = ""
     features:           Dict[str, float] = field(default_factory=dict)
     explanation:        str = ""
 
@@ -168,6 +180,10 @@ class DynamicKDecision:
             "knee_gap":            round(self.knee_gap, 4),
             "knee_index":          self.knee_index,
             "evidence_alignment":  round(self.evidence_alignment, 4),
+            "formula_mode":        self.formula_mode,
+            "is_abstained":        self.is_abstained,
+            "abstention_reason":   self.abstention_reason,
+            "stop_reason":         self.stop_reason,
             "features":            {k: round(v, 4) for k, v in self.features.items()},
             "explanation":         self.explanation,
         }
@@ -278,47 +294,71 @@ class DynamicTopKController:
         knee_index        = confidence_result.knee_index
         evidence          = confidence_result.evidence_alignment
 
-        # ── Phase 3: Combined Demand → K ─────────────────────────────────────
-        #
-        # Formula (see module docstring):
-        #   combined_demand = alpha * C_q + beta * (1 - R_c)
-        #   raw_K           = K_min + combined_demand * (K_max - K_min)
-        #
+        # ── Phase 3: Demand & Retrieval Quota Calculation ────────────────────
+        k_range = cfg.k_max - cfg.k_min
         complexity_demand = c_q
         confidence_demand = 1.0 - r_c
         combined_demand   = cfg.alpha * complexity_demand + cfg.beta * confidence_demand
-
-        k_range = cfg.k_max - cfg.k_min
-        raw_k   = cfg.k_min + combined_demand * k_range
-
-        # ── Phase 4: Coverage safeguard ───────────────────────────────────────
-        # Multi-part / comparative queries with low evidence_alignment may still
-        # score a high R_c if individual chunk scores are strong.  In that case,
-        # we add a coverage_penalty to prevent premature termination.
-        is_multi_part = self._is_multi_part(query, features)
         coverage_penalty_applied = 0
-        if is_multi_part and evidence < cfg.coverage_threshold:
-            raw_k += cfg.coverage_penalty
-            coverage_penalty_applied = cfg.coverage_penalty
-            logger.debug(
-                "[TOPK] Coverage penalty +%d applied: multi_part=True, evidence=%.2f",
-                cfg.coverage_penalty, evidence,
-            )
+        is_shortcut = False
+        is_abstained = False
+        abstention_reason = ""
 
-        # ── Phase 5: High-confidence factual shortcut ─────────────────────────
-        # Force K = K_min when: simple query + very confident + clear knee cliff
-        is_shortcut = (
-            c_q <= 0.25
-            and r_c >= 0.80
-            and knee_index <= 2
-            and knee_gap >= 0.20
-        )
-        if is_shortcut:
+        # Principled OOD / Noise Floor Abstention:
+        # If no chunks were returned, or peak similarity score is below the calibrated
+        # noise floor, evidence does not exist in the corpus. We abstain from expansion.
+        if cfg.enable_abstention and (not initial_chunks or s_top < cfg.similarity_floor):
+            is_abstained = True
+            abstention_reason = (
+                f"Peak similarity ({s_top:.3f}) below noise floor ({cfg.similarity_floor:.2f}); "
+                "query appears out-of-distribution or unanswerable."
+            )
             recommended_k = cfg.k_min
-            stop_reason   = "high-confidence factual shortcut"
-        else:
+            stop_reason = "abstain_low_similarity_floor"
+        elif cfg.formula_mode == "fixed":
+            recommended_k = max(cfg.k_min, min(cfg.fixed_k, cfg.k_max))
+            stop_reason = "fixed_k_baseline"
+        elif cfg.formula_mode == "complexity_only":
+            raw_k = cfg.k_min + complexity_demand * k_range
             recommended_k = max(cfg.k_min, min(round(raw_k), cfg.k_max))
-            stop_reason   = "combined demand formula"
+            stop_reason = "complexity_only_demand"
+        elif cfg.formula_mode == "confidence_only":
+            raw_k = cfg.k_min + confidence_demand * k_range
+            recommended_k = max(cfg.k_min, min(round(raw_k), cfg.k_max))
+            stop_reason = "confidence_only_demand"
+        elif cfg.formula_mode == "paper":
+            # Exact Research Paper Formula:
+            # K* = ceil(clip(K_min + (1 - R_c) * K_range + gamma * C_q, K_min, K_max))
+            raw_k = cfg.k_min + confidence_demand * k_range + cfg.gamma * c_q
+            recommended_k = math.ceil(max(cfg.k_min, min(raw_k, cfg.k_max)))
+            stop_reason = "paper_additive_formula"
+        else:
+            # Default "normalized_demand"
+            raw_k = cfg.k_min + combined_demand * k_range
+
+            # Coverage safeguard
+            is_multi_part = self._is_multi_part(query, features)
+            if is_multi_part and evidence < cfg.coverage_threshold:
+                raw_k += cfg.coverage_penalty
+                coverage_penalty_applied = cfg.coverage_penalty
+                logger.debug(
+                    "[TOPK] Coverage penalty +%d applied: multi_part=True, evidence=%.2f",
+                    cfg.coverage_penalty, evidence,
+                )
+
+            # High-confidence factual shortcut
+            is_shortcut = (
+                c_q <= 0.25
+                and r_c >= 0.70
+                and knee_index <= 2
+                and knee_gap >= 0.15
+            )
+            if is_shortcut:
+                recommended_k = cfg.k_min
+                stop_reason = "high-confidence factual shortcut"
+            else:
+                recommended_k = max(cfg.k_min, min(round(raw_k), cfg.k_max))
+                stop_reason = "combined demand formula"
 
         # ── Phase 6: Document diversity allocation ────────────────────────────
         target_docs, chunks_per_doc = self._allocate_diversity(
@@ -346,6 +386,10 @@ class DynamicTopKController:
             knee_gap=round(knee_gap, 4),
             knee_index=knee_index,
             evidence_alignment=round(evidence, 4),
+            formula_mode=cfg.formula_mode,
+            is_abstained=is_abstained,
+            abstention_reason=abstention_reason,
+            stop_reason=stop_reason,
             features=features,
             explanation=explanation,
         )

@@ -1,0 +1,17 @@
+{
+  "timestamp": "2026-10-16T19:25:08.082043+00:00",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "python_version": "3.14.3",
+  "system_processor": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel",
+  "cpu_count_logical": 12,
+  "total_ram_gb": 15.71,
+  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "embedding_dimension": 384,
+  "tokenizer": "BertTokenizer",
+  "dataset_total_queries": 120,
+  "dataset_answerable_queries": 105,
+  "dataset_unanswerable_queries": 15,
+  "corpus_chunks": 33,
+  "qdrant_cloud_host": "localhost...masked",
+  "supabase_project": "https://zihrudklslqdbjktdwrl...masked"
+}

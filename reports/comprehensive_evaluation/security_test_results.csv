@@ -1,0 +1,16 @@
+timestamp,category,test_name,status,severity,details
+2026-10-16T19:18:31.574077+00:00,Cryptography,roundtrip_encryption_decryption,PASSED,CRITICAL,"Verified 5 varied payload types (empty, short, 1KB, binary bytes, UTF-8 unicode)."
+2026-10-16T19:18:31.574244+00:00,Cryptography,tampered_ciphertext_detection,PASSED,CRITICAL,Bit flip in ciphertext rejected by Poly1305 AEAD tag authentication.
+2026-10-16T19:18:31.574326+00:00,Cryptography,tampered_auth_tag_rejection,PASSED,CRITICAL,Modified authentication tag correctly triggers integrity failure.
+2026-10-16T19:18:31.574340+00:00,Cryptography,truncated_blob_bounds_check,PASSED,HIGH,Blobs < 28 bytes (12B nonce + 16B tag) rejected before cipher initialization.
+2026-10-16T19:18:31.574409+00:00,Cryptography,hkdf_key_separation_and_isolation,PASSED,CRITICAL,"HKDF-SHA256 generates unique 32-byte keys for each (user, file) pair; cross-user decryption fails."
+2026-10-16T19:18:31.576116+00:00,Cryptography,nonce_uniqueness_no_reuse,PASSED,CRITICAL,Generated 200 distinct 12-byte nonces with zero collisions.
+2026-10-16T19:18:31.576147+00:00,Authentication,missing_jwt_rejection,PASSED,CRITICAL,Empty or missing token correctly raises HTTP 401 Unauthorized.
+2026-10-16T19:18:32.958360+00:00,Authentication,malformed_jwt_rejection,PASSED,CRITICAL,Malformed JWT raises HTTP 401 Unauthorized.
+2026-10-16T19:18:32.966812+00:00,Authentication,expired_jwt_rejection,PASSED,CRITICAL,Expired JWT rejected with HTTP 401 'Token has expired'.
+2026-10-16T19:18:32.967431+00:00,Authentication,invalid_signature_rejection,PASSED,CRITICAL,Forged JWT with wrong signature secret raises HTTP 401.
+2026-10-16T19:18:32.967455+00:00,Authorization,ownership_assertion_enforcement,PASSED,HIGH,assert_owns_resource strictly raises HTTP 403 when current_user['sub'] != resource_user_id.
+2026-10-16T19:18:42.006589+00:00,Tenant Isolation,cross_tenant_document_escalation_blocked,PASSED,CRITICAL,User A's attempts to view or generate signed URLs for User B's documents return 403 Forbidden.
+2026-10-16T19:18:42.014539+00:00,Tenant Isolation,cross_tenant_deletion_blocked,PASSED,CRITICAL,Unauthorized document deletion by cross-tenant actor correctly rejected with 403 Forbidden.
+2026-10-16T19:18:42.014571+00:00,Prompt Injection,system_prompt_evidence_guardrails,PASSED,MEDIUM,System prompt explicitly mandates closed-world evidence grounding and abstention phrasing.
+2026-10-16T19:18:42.015009+00:00,Data Exposure,telemetry_zero_secret_and_text_leakage,PASSED,HIGH,"Telemetry log format confirmed strictly numerical/metadata; no API keys, bearer tokens, or document text present."
