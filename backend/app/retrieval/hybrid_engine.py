@@ -269,8 +269,12 @@ class HybridRetrievalEngine:
                     continue
                 if parsed.month is not None and doc_month is not None and doc_month.lower() != parsed.month.lower():
                     continue
-                if parsed.document_type and doc_type and doc_type.lower() != parsed.document_type.lower():
-                    continue
+                if parsed.document_type:
+                    doc_tags = p.get("tags", [])
+                    matches_type = bool(doc_type and doc_type.lower() == parsed.document_type.lower())
+                    matches_tag = isinstance(doc_tags, list) and any(str(t).lower() == parsed.document_type.lower() for t in doc_tags)
+                    if not (matches_type or matches_tag):
+                        continue
                 
                 # We create a dummy CandidateChunk for the Ranker and Preview URL generation to use
                 chunk = CandidateChunk(

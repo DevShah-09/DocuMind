@@ -12,18 +12,27 @@ import { Card } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSearchParams } from 'react-router-dom';
+import RichAnswer from '@/components/RichAnswer';
 
 const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 // ── API helper ─────────────────────────────────────────────────────────────────
-async function chatWithLLM(query, token) {
+async function chatWithLLM(query, token, history = [], activeDocIds = []) {
+  const payload = {
+    query,
+    limit: 5,
+    score_threshold: 0.10,
+    history: history.length > 0 ? history : undefined,
+    active_document_ids: activeDocIds.length > 0 ? activeDocIds : undefined,
+  };
+
   const res = await fetch(`${API_BASE}/chat`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ query, limit: 5, score_threshold: 0.10 }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -59,9 +68,28 @@ function scoreBg(score) {
 // ── Result Card ────────────────────────────────────────────────────────────────
 function ResultCard({ result, rank, token, onPreview }) {
   const scorePercent = Math.round(result.score * 100);
-  const docTypePretty = (result.document_type || 'document')
+  let rawType = result.document_type || 'document';
+  if ((result.filename || '').toLowerCase().includes('report') && (rawType === 'research_paper' || rawType === 'academic_paper')) {
+    rawType = 'report';
+  }
+  const prettyMap = {
+    report: 'Project Report',
+    research_paper: 'Research Paper',
+    student_id_card: 'Student ID Card',
+    secondary_school_certificate: '10th / 12th Marksheet',
+    aadhaar: 'Aadhaar',
+    pan_card: 'PAN Card',
+    electricity_bill: 'Electricity Bill',
+    mobile_bill: 'Mobile Bill',
+    bank_statement: 'Bank Statement',
+  };
+  const docTypePretty = prettyMap[rawType] || rawType
     .replace(/_/g, ' ')
     .replace(/\b\w/g, (c) => c.toUpperCase());
+
+  const summaryText = ((result.filename || '').toLowerCase().includes('report') && result.summary)
+    ? result.summary.replace(/\ba research paper\b/gi, 'a project report')
+    : result.summary;
 
   return (
     <Card className={`p-4 border transition-all hover:shadow-md overflow-hidden ${scoreBg(result.score)}`}>
@@ -101,11 +129,11 @@ function ResultCard({ result, rank, token, onPreview }) {
         </div>
 
         {/* Summary */}
-        {result.summary && (
+        {summaryText && (
           <div className="min-w-0">
             <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-0.5">Summary</p>
             <p className="text-xs text-slate-600 dark:text-slate-300 line-clamp-3 leading-relaxed break-words">
-              {result.summary}
+              {summaryText}
             </p>
           </div>
         )}
@@ -262,13 +290,56 @@ const QueryInterface = () => {
       const finalMessages = [...messagesRef.current, greetMsg];
       messagesRef.current = finalMessages;
       setMessages(finalMessages);
+
+      // Persist greeting in history as well
+      const entryId = `h_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const historyEntry = {
+        id: entryId,
+        query: q,
+        timestamp: new Date().toISOString(),
+        resultCount: 0,
+        topFile: null,
+        snapshot: { messages: finalMessages, results: [] },
+      };
+      try {
+        const existing = JSON.parse(localStorage.getItem('qi_history') || '[]');
+        const updated = [historyEntry, ...existing.filter((e) => e.id !== entryId)].slice(0, 200);
+        localStorage.setItem('qi_history', JSON.stringify(updated));
+        window.dispatchEvent(new Event('qi_history_updated'));
+      } catch { /* ignore storage errors */ }
+
+      if (token) {
+        fetch(`${API_BASE}/history`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(historyEntry),
+        }).catch((err) => console.error('Failed to sync greeting history:', err));
+      }
+
       setIsLoading(false);
       return;
     }
 
     try {
-      // Call POST /chat — the real RAG + LLM pipeline
-      const data = await chatWithLLM(q, token);
+      // Build conversation history for multi-turn GPT-like continuity
+      const historyPayload = messagesRef.current
+        .filter((m) => m.type === 'user' || m.type === 'ai')
+        .slice(-6)
+        .map((m) => ({
+          role: m.type === 'user' ? 'user' : 'assistant',
+          content: m.content || '',
+        }));
+
+      // Active document context from the currently viewed sources
+      const activeDocIds = searchResults
+        .map((s) => s.document_id)
+        .filter(Boolean);
+
+      // Call POST /chat — the conversational RAG + LLM pipeline
+      const data = await chatWithLLM(q, token, historyPayload, activeDocIds);
 
       // Sources from the RAG pipeline → right panel document cards
       const sources = data.sources || [];
@@ -294,10 +365,10 @@ const QueryInterface = () => {
       messagesRef.current = finalMessages;
       setMessages(finalMessages);
 
-      // ── Upsert session entry in history ──────────────────────────────────
-      const sessionId = sessionIdRef.current;
+      // ── Upsert query entry in history ──────────────────────────────────
+      const entryId = `h_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       const historyEntry = {
-        id: sessionId,
+        id: entryId,
         query: q,
         timestamp: new Date().toISOString(),
         resultCount: sources.length,
@@ -305,11 +376,13 @@ const QueryInterface = () => {
         snapshot: { messages: finalMessages, results: sources },
       };
 
-      // 1. Sync to localStorage for immediate offline access
+      // 1. Sync to localStorage immediately
       try {
         const existing = JSON.parse(localStorage.getItem('qi_history') || '[]');
-        const filtered = existing.filter((e) => e.id !== sessionId);
-        localStorage.setItem('qi_history', JSON.stringify([historyEntry, ...filtered].slice(0, 200)));
+        const updated = [historyEntry, ...existing.filter((e) => e.id !== entryId)].slice(0, 200);
+        localStorage.setItem('qi_history', JSON.stringify(updated));
+        // Dispatch local event so QueryHistory updates immediately if open or cached
+        window.dispatchEvent(new Event('qi_history_updated'));
       } catch { /* ignore storage errors */ }
 
       // 2. Sync to Backend API for cross-device persistence
@@ -411,45 +484,8 @@ const QueryInterface = () => {
                       </div>
                     ) : (
                       <div className="w-full space-y-3" data-testid="ai-message">
-                        <div className="text-sm text-slate-700 dark:text-slate-200 leading-relaxed whitespace-pre-wrap">
-                          {message.content}
-                        </div>
-                        <div className="flex items-center flex-wrap gap-2">
-                          {message.resultCount > 0 && (
-                            <Badge variant="outline"
-                                   className="bg-cyan-50 dark:bg-cyan-900/20 text-cyan-700 dark:text-cyan-400
-                                              border-cyan-200 dark:border-cyan-800 text-xs">
-                              {message.resultCount} document{message.resultCount > 1 ? 's' : ''} found
-                            </Badge>
-                          )}
-                          {message.parsedQuery?.document_type && (
-                            <Badge variant="outline"
-                                   className="bg-violet-50 dark:bg-violet-900/20 text-violet-700
-                                              dark:text-violet-400 border-violet-200 dark:border-violet-800 text-xs">
-                              {message.parsedQuery.document_type.replace(/_/g, ' ')}
-                            </Badge>
-                          )}
-                          {message.parsedQuery?.year && (
-                            <Badge variant="outline"
-                                   className="bg-slate-50 dark:bg-slate-800 text-slate-600
-                                              dark:text-slate-300 border-slate-200 dark:border-slate-700 text-xs">
-                              {message.parsedQuery.year}
-                            </Badge>
-                          )}
-                          {message.dynamicK && (
-                            <Badge variant="outline"
-                                   title={`Complexity: ${message.dynamicK.c_q} | Confidence: ${Math.round(message.dynamicK.r_c * 100)}% | Knee Cliff: ${message.dynamicK.knee_gap} @ idx ${message.dynamicK.knee_index}`}
-                                   className="bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-400
-                                              border-emerald-200 dark:border-emerald-800 text-xs flex items-center gap-1 cursor-help">
-                              <span>🎯 Adaptive K: {message.dynamicK.recommended_k}</span>
-                              <span className="text-[10px] opacity-75">({message.dynamicK.target_documents} doc{message.dynamicK.target_documents > 1 ? 's' : ''})</span>
-                            </Badge>
-                          )}
-                          {message.latency && (
-                            <span className="text-xs text-slate-400 dark:text-slate-500">
-                              {Math.round(message.latency)}ms
-                            </span>
-                          )}
+                        <div className="text-sm text-slate-700 dark:text-slate-200 leading-relaxed">
+                          <RichAnswer content={message.content} />
                         </div>
                       </div>
                     )}
@@ -483,16 +519,16 @@ const QueryInterface = () => {
                 onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSendQuery()}
                 placeholder="e.g. Give me SSC marksheet, Show SBI bank statement from Jan 2024…"
                 disabled={isLoading}
-                className="h-13 pl-5 pr-14 rounded-xl border-slate-200 dark:border-slate-800
-                           focus:ring-2 focus:ring-cyan-500 text-sm disabled:opacity-60"
+                className="h-12 pl-5 pr-12 rounded-xl border-slate-200 dark:border-slate-800
+                           focus:ring-2 focus:ring-cyan-500 text-sm disabled:opacity-60 bg-white dark:bg-slate-900 shadow-sm"
                 data-testid="query-input"
               />
               <Button
                 onClick={handleSendQuery}
                 disabled={!query.trim() || isLoading}
-                className="absolute right-2 top-1/2 -translate-y-1/2 w-9 h-9 p-0 rounded-lg
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 p-0 rounded-lg
                            bg-gradient-to-r from-cyan-600 to-cyan-500
-                           hover:from-cyan-500 hover:to-cyan-600 text-white disabled:opacity-40"
+                           hover:from-cyan-500 hover:to-cyan-600 text-white shadow-sm flex items-center justify-center disabled:opacity-40"
                 data-testid="send-button"
               >
                 {isLoading

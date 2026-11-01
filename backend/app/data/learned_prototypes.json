@@ -4,5 +4,20 @@
   ],
   "student_identity_card": [
     "COLLEGE OF ENGINEERING STUDENT IDENTITY CARD\nStudent Name: John Doe\nDepartment: Computer Engineering\nAcademic Year: 2024-2028\nStudent ID: 000123456\nValid Until: June 2028\nBlood Group: O+\nEmergency Contact: 9876543210"
+  ],
+  "resume": [
+    "Shubham Shah\nshubhamshah048@gmail.com\n \n7498355039\n \nVirar\n \nLinkedIn\n \nGitHub\n \nEDUCATION\nB.Tech In Computer Engineering\nDwarkadas J.  Sanghvi College Of Engineering\n06/2024 \u2013 Present\nCGPA: 9.69\nEXPERIENCE\nAI & Data Science Intern | XYlo AI\n06/2026 \u2013 07/2026\n\u2022Developed ML solutions for Sales Forecasting, Employee Attrition, and House Price Prediction using Python and Scikit-\nlearn.\n\u2022Applied Proph"
+  ],
+  "research_paper": [
+    "1\nDocuMind AI: AI Driven Document Classification, Retrieval \nand Query Intelligence Platform\nDev Shah*, Shubham Shah*, Rishi Shah*, Paarth Shibe* and Dr. Nilesh Patil\u2020**\n*Department of Computer Engineering, Dwarkadas J. Sanghvi College of Engineering, Mumbai, India\n\u2020Project Guide, Department of Computer Engineering, Dwarkadas J. Sanghvi College of Engineering, Mumbai, India\nEmail: nileshdeep@gmail",
+    "\u200b\n\u200b\n\u200b\n \nUniversity of Mumbai \n2025 \u2013 2026 \n \nDOCUMIND \nSubmitted in partial fulfillment of the requirements of \nthe course Innovative Product Development-II \n \n \n \nYear 2, Sem IV Computer Engineering \n \nBy \n \nDev Shah \n60004240274 \nRishi Shah \n60004240277 \nShubham Shah \n60004240130 \nPaarth Shibe \n60004240183 \n \nGuide: \n \nDr. Nilesh Patil \nDesignation: Assistant Professor \n1\n\nCERTIFICATE \n \n \nThis",
+    "James F. Kurose\nUniversity of Massachusetts, Amherst\nKeith W. Ross\nPolytechnic Institute of NYU\nCOMPUTER\nNETWORKING\nA Top-Down Approach\nSIXTH EDITION\nBoston  Columbus  Indianapolis  New York  San Francisco  Upper Saddle River\nAmsterdam\nCape Town  Dubai  London  Madrid  Milan  Munich  Paris  Montr\u00e9al  Toronto\nDelhi  Mexico City  S\u00e3o Paulo  Sydney  Hong Kong  Seoul  Singapore  Taipei  Tokyo\n\nVice Pr",
+    "Page 1/9 \nExperiment 2 \nData Warehouse / Data Mart Design \nAim: Build a Data Warehouse/Data Mart for a given problem statement: (i) identify source tables and populate \nsample data, (ii) design the information package diagram, (iii) design Star, Snowflake and Fact \nConstellation schemas. \nSource file: Exp2_Data_Warehouse_Schemas.py   |   Run with: python \"Exp2_Data_Warehouse_Schemas.py\" (cwd = PY/"
+  ],
+  "certificate": [
+    "Aug 17, 2026\nShubham Shah\nMastering Neural Networks and Model\nRegularization\nan online course authorized by Johns Hopkins University and offered through Coursera\nhas successfully completed\nVerify at:\nhttps://coursera.org/verify/HURCTXPU0KZ8\n\u00a0 Coursera has confirmed the identity of this individual and their\nparticipation in the course.\nThis certificate attests to the learner\u2019s completion of an onli"
+  ],
+  "student_id_card": [
+    "STUDENT IDENTITY CARD\nCOLLEGE OF ENGINEERING & TECHNOLOGY\nName: Shubham Shah\nRoll No: 1098234\nBranch: Computer Engineering\nAcademic Year: 2024-2025\nValid Upto: June 2026\nDepartment of Computer Engineering"
   ]
 }

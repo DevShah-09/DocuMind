@@ -199,6 +199,16 @@ async def batch_search(
     )
 
 
+# ── GET /documents/categories ──────────────────────────────────────────────────────
+@router.get(
+    "/documents/categories",
+    summary="Get document categories and summary",
+)
+async def get_doc_categories_retrieval(current_user: dict = Depends(get_current_user)):
+    from app.api.upload import get_document_categories
+    return await get_document_categories(current_user=current_user)
+
+
 # ── GET /documents/{id} ────────────────────────────────────────────────────────
 
 @router.get(
@@ -227,7 +237,10 @@ async def get_document(
             # ── Fallback to legacy collection ──
             from app.services.vector_db import VectorDBService
             vdb = VectorDBService()
-            legacy_doc = vdb.get_document(document_id)
+            try:
+                legacy_doc = vdb.get_document(document_id)
+            except Exception:
+                legacy_doc = None
             if not legacy_doc or legacy_doc.payload.get("user_id") != user_id:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,

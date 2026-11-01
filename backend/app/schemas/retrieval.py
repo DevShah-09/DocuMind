@@ -29,6 +29,7 @@ class ParsedQuery(BaseModel):
     month: Optional[str] = Field(None, description="Full month name e.g. January")
     entities: List[str] = Field(default_factory=list, description="Named entities: vendors, banks, etc.")
     amount_filters: Optional[AmountFilter] = Field(None, description="Amount/price filter if detected")
+    is_latest: bool = Field(False, description="Whether user requested the latest/updated version")
     semantic_query: str = Field(..., description="Clean semantic search string")
     raw_query: str = Field("", description="Original user query")
 
@@ -183,12 +184,18 @@ class BatchSearchResponse(BaseModel):
 
 # ── Chat (RAG) ─────────────────────────────────────────────────────────────────
 
+class ChatHistoryMessage(BaseModel):
+    role: str = Field(..., description="'user' or 'assistant'")
+    content: str = Field(..., description="Message text content")
+
 class ChatRequest(BaseModel):
     """Payload for POST /chat."""
     query: str = Field(..., min_length=1, max_length=1000, description="Natural language query or instruction")
     limit: int = Field(5, ge=1, le=20, description="Max source documents to retrieve")
     score_threshold: float = Field(0.10, ge=0.0, le=1.0, description="Minimum similarity score for retrieval")
     dynamic_k_enabled: bool = Field(True, description="Enable adaptive Dynamic Top-K governor")
+    history: Optional[List[ChatHistoryMessage]] = Field(default=None, description="Previous conversation messages for context continuity")
+    active_document_ids: Optional[List[str]] = Field(default=None, description="Active document IDs from the conversation context")
 
 
 class ChatSource(BaseModel):
@@ -200,6 +207,7 @@ class ChatSource(BaseModel):
     score: float
     year: Optional[int] = None
     month: Optional[str] = None
+    upload_timestamp: Optional[str] = None
     preview_url: str = ""
 
 

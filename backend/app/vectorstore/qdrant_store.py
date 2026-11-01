@@ -83,29 +83,30 @@ class QdrantStore:
                 ),
             )
             logger.info("[QDRANT] Created collection '%s' (dim=%d)", COLLECTION, VECTOR_DIM)
-
-            # ── Payload indexes for filtered search performance ─────────────
-            index_specs = [
-                ("user_id",       qm.PayloadSchemaType.KEYWORD),
-                ("document_id",   qm.PayloadSchemaType.KEYWORD),
-                ("chunk_id",      qm.PayloadSchemaType.KEYWORD),
-                ("document_type", qm.PayloadSchemaType.KEYWORD),
-                ("filename",      qm.PayloadSchemaType.KEYWORD),
-                ("month",         qm.PayloadSchemaType.KEYWORD),
-                ("year",          qm.PayloadSchemaType.INTEGER),
-            ]
-            for field_name, schema_type in index_specs:
-                try:
-                    self._client.create_payload_index(
-                        collection_name=COLLECTION,
-                        field_name=field_name,
-                        field_schema=schema_type,
-                    )
-                    logger.info("[QDRANT] Created payload index: %s (%s)", field_name, schema_type)
-                except Exception as e:
-                    logger.warning("[QDRANT] Could not create index %s: %s", field_name, e)
         else:
-            logger.info("[QDRANT] Collection '%s' already exists — skipping creation", COLLECTION)
+            logger.info("[QDRANT] Collection '%s' already exists — checking indexes", COLLECTION)
+
+        # ── Ensure payload indexes for filtered search performance ─────────
+        index_specs = [
+            ("user_id",       qm.PayloadSchemaType.KEYWORD),
+            ("document_id",   qm.PayloadSchemaType.KEYWORD),
+            ("chunk_id",      qm.PayloadSchemaType.KEYWORD),
+            ("document_type", qm.PayloadSchemaType.KEYWORD),
+            ("tags",          qm.PayloadSchemaType.KEYWORD),
+            ("filename",      qm.PayloadSchemaType.KEYWORD),
+            ("month",         qm.PayloadSchemaType.KEYWORD),
+            ("year",          qm.PayloadSchemaType.INTEGER),
+        ]
+        for field_name, schema_type in index_specs:
+            try:
+                self._client.create_payload_index(
+                    collection_name=COLLECTION,
+                    field_name=field_name,
+                    field_schema=schema_type,
+                )
+                logger.info("[QDRANT] Ensured payload index: %s (%s)", field_name, schema_type)
+            except Exception:
+                pass
 
     # ── Async wrappers ─────────────────────────────────────────────────────────
 
@@ -179,10 +180,20 @@ class QdrantStore:
 
         if filters:
             if filters.get("document_type"):
+                doc_type_val = filters["document_type"]
+                # Match either the primary document_type OR any tag in the multi-doc tags array
                 must_conditions.append(
-                    qm.FieldCondition(
-                        key="document_type",
-                        match=qm.MatchValue(value=filters["document_type"]),
+                    qm.Filter(
+                        should=[
+                            qm.FieldCondition(
+                                key="document_type",
+                                match=qm.MatchValue(value=doc_type_val),
+                            ),
+                            qm.FieldCondition(
+                                key="tags",
+                                match=qm.MatchValue(value=doc_type_val),
+                            ),
+                        ]
                     )
                 )
             if filters.get("year") is not None:

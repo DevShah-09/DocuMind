@@ -60,30 +60,122 @@ def extract_text_with_easyocr(images_base64: list[str]) -> str:
 
 AMBIGUOUS_KEYWORDS = {"mobile", "gas", "water", "bank", "tax", "bill", "pan", "medical", "electric", "statement", "policy"}
 
-def fallback_classify_from_text(text: str, clf_result=None) -> tuple[str, int]:
+def fallback_classify_from_text(text: str, clf_result=None) -> tuple[str, int, list[str]]:
     """
-    When cloud Vision/Text LLM API fails (e.g. 402 Insufficient Credits),
+    When cloud Vision/Text LLM API fails (e.g. 402 Insufficient Credits, timeout),
     classify using explicit content keyword scanning or calibrated local BGE prediction.
+    Detects composite/merged documents with multiple types and returns ('miscellaneous', 90, tags).
     """
     text_lower = text.lower()
     
-    # Check for Student / College Identity Card specific terms
-    student_id_terms = ["identity card", "student id", "college of engineering", "roll no", "enrollment no", "student identity card"]
-    if any(term in text_lower for term in student_id_terms):
-        return "student_id_card", 85
+    # 1. Scan for all distinct document types present in text
+    detected_types = set()
+    if any(term in text_lower for term in ["identity card", "student id", "college of engineering", "roll no", "enrollment no", "student identity card"]):
+        detected_types.add("student_id_card")
 
-    # 1. High-precision content keyword scanning against DOC_TYPE_MAP phrases
     for phrase, slug in sorted(DOC_TYPE_MAP.items(), key=lambda x: -len(x[0])):
         if phrase in AMBIGUOUS_KEYWORDS:
             continue
         if phrase in text_lower:
-            return slug, 85
+            detected_types.add(slug)
+
+    # If MULTIPLE distinct document types exist in the same file, it is a miscellaneous bundle!
+    if len(detected_types) > 1:
+        return "miscellaneous", 90, sorted(list(detected_types))
+
+    if len(detected_types) == 1:
+        single_type = list(detected_types)[0]
+        return single_type, 85, [single_type]
 
     # 2. Local BGE top prediction check (requires score >= 0.58 AND margin >= 0.05)
     if clf_result and clf_result.top_score >= 0.58 and clf_result.margin >= 0.05:
-        return clf_result.category, round(clf_result.top_score * 100)
+        return clf_result.category, round(clf_result.top_score * 100), [clf_result.category]
 
-    return "miscellaneous", 50
+    return "miscellaneous", 50, ["miscellaneous"]
+
+
+CANONICAL_CATEGORY_MAP = {
+    # Student ID Card
+    "student_id": "student_id_card",
+    "student_identity_card": "student_id_card",
+    "student_identity": "student_id_card",
+    "identity_card": "student_id_card",
+    "college_id": "student_id_card",
+    "college_id_card": "student_id_card",
+    "school_id": "student_id_card",
+    "school_id_card": "student_id_card",
+    "student_card": "student_id_card",
+
+    # Research Paper
+    "academic_paper": "research_paper",
+    "conference_paper": "research_paper",
+    "journal_paper": "research_paper",
+    "scientific_paper": "research_paper",
+    "paper": "research_paper",
+
+    # Report
+    "project_report": "report",
+    "course_report": "report",
+    "technical_report": "report",
+    "ipd_report": "report",
+    "engineering_report": "report",
+    "internship_report": "report",
+    "thesis": "report",
+
+    # Marksheet
+    "secondary_school_certificate": "marksheet",
+    "higher_secondary_certificate": "marksheet",
+    "mark_sheet": "marksheet",
+    "grade_card": "marksheet",
+    "report_card": "marksheet",
+    "10th_marksheet": "marksheet",
+    "12th_marksheet": "marksheet",
+
+    # Bills
+    "electric_bill": "electricity_bill",
+    "light_bill": "electricity_bill",
+    "power_bill": "electricity_bill",
+    "phone_bill": "mobile_bill",
+    "telephone_bill": "mobile_bill",
+    "cell_bill": "mobile_bill",
+
+    # Aadhaar / PAN
+    "aadhar": "aadhaar",
+    "aadhar_card": "aadhaar",
+    "pan": "pan_card",
+
+    # Resume
+    "cv": "resume",
+    "curriculum_vitae": "resume",
+}
+
+def canonicalize_category(raw_cat: str, filename: str = "", text_snippet: str = "") -> str:
+    """
+    Enforces category canonicalization:
+    - If a synonymous category exists (e.g. student_id vs student_id_card), maps to canonical.
+    - If filename or text indicates a project report, ensures 'report' category.
+    - If it's a completely new category (e.g. rental_agreement), cleanly slugifies it.
+    """
+    if not raw_cat:
+        return "miscellaneous"
+    clean = re.sub(r"[^a-zA-Z0-9_]+", "_", raw_cat.strip().lower()).strip("_")
+    
+    # 1. Check filename override for reports
+    fn_lower = (filename or "").lower()
+    if "report" in fn_lower and "medical" not in fn_lower:
+        return "report"
+        
+    # 2. Check canonical map
+    canonical = CANONICAL_CATEGORY_MAP.get(clean, clean)
+    
+    # 3. Content heuristic check
+    if canonical in ("research_paper", "academic_paper"):
+        snippet_lower = (text_snippet or "").lower()[:2000]
+        if "project report" in snippet_lower or "course" in snippet_lower or "department of computer" in snippet_lower:
+            canonical = "report"
+            
+    return canonical
+
 
 class DocumentOrchestrator:
     def __init__(self):
@@ -98,7 +190,8 @@ class DocumentOrchestrator:
         original_name: str, 
         content_type: str, 
         user_id: str,
-        file_id: str
+        file_id: str,
+        progress_callback = None,
     ):
         # Metadata Generation
         file_hash = hashlib.sha256(file_content).hexdigest()
@@ -108,6 +201,9 @@ class DocumentOrchestrator:
         if existing_doc:
             print(f"[PROCESSOR] Duplicate detected: {original_name} already exists for user={user_id}.")
             raise ValueError("This file already exists in your collections.")
+
+        if progress_callback:
+            await progress_callback("reading", 25, "Extracting text and pages...")
 
         doc_id = file_id  # Use the shared file_id from API
         upload_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -128,9 +224,9 @@ class DocumentOrchestrator:
                 extracted_text = "\n\n".join(full_text).strip()
 
                 # If text is short (<50 words), render page images for Vision LLM backup
-                # DO NOT erase extracted_text if text exists!
+                # Render up to 10 pages so multi-page scanned collections/ID bundles are fully extracted!
                 if len(extracted_text.split()) < 50:
-                    max_pages = min(2, len(doc))
+                    max_pages = min(10, len(doc))
                     for page_num in range(max_pages):
                         page = doc.load_page(page_num)
                         mat = fitz.Matrix(1.25, 1.25)
@@ -145,6 +241,9 @@ class DocumentOrchestrator:
             images_base64.append(base64.b64encode(file_content).decode('utf-8'))
 
         # Step 2: Analyze Document
+        if progress_callback:
+            await progress_callback("analyzing", 45, "Analyzing document content with AI...")
+
         # Path A — Digital text PDF: try local BGE classifier first.
         #   If confident (score >= threshold AND margin >= threshold) → skip Qwen-72B entirely.
         #   If uncertain → fall through to Qwen-72B for full analysis.
@@ -156,7 +255,7 @@ class DocumentOrchestrator:
             print(
                 f"[CLASSIFIER] top={clf_result.category} score={clf_result.top_score:.4f} "
                 f"second={clf_result.second_score:.4f} margin={clf_result.margin:.4f} "
-                f"→ {'LOCAL ACCEPT' if clf_result.accepted else 'FALLBACK→Qwen-72B'}"
+                f"-> {'LOCAL ACCEPT' if clf_result.accepted else 'FALLBACK->Qwen-72B'}"
             )
 
             if clf_result.accepted:
@@ -178,28 +277,27 @@ class DocumentOrchestrator:
                 print(f"[PROCESSOR] Classifier uncertain — calling Qwen-72B for full analysis...")
                 analysis_json_str = await self.vision.analyze_text_document(extracted_text, original_name)
 
-                # Graceful degradation: if Qwen-72B fails (e.g. 402 payment required, timeout)
+                # Graceful degradation: ONLY if Qwen completely failed or returned miscellaneous with no tags
                 try:
                     parsed_check = json.loads(analysis_json_str)
-                    if parsed_check.get("category") == "miscellaneous":
-                        fb_category, fb_conf = fallback_classify_from_text(extracted_text, clf_result)
-                        if fb_category != "miscellaneous":
-                            print(
-                                f"[PROCESSOR] Qwen API failed/miscellaneous — using content fallback: "
-                                f"{fb_category} ({fb_conf}% conf, BGE score={clf_result.top_score:.4f})"
-                            )
-                            analysis_json_str = json.dumps({
-                                "is_blur": False,
-                                "blur_reason": None,
-                                "category": fb_category,
-                                "confidence": fb_conf,
-                                "metadata": {},
-                                "summary": f"Classified as {fb_category} based on document text content (BGE score={clf_result.top_score:.2f}).",
-                                "text": extracted_text,
-                                "_classifier": "content_bge_fallback",
-                            })
-                        else:
-                            print(f"[PROCESSOR] Content fallback uncertain — retaining miscellaneous.")
+                    has_multi_tags = bool(parsed_check.get("tags") and len(parsed_check.get("tags", [])) > 1)
+                    if parsed_check.get("category") == "miscellaneous" and not has_multi_tags:
+                        fb_category, fb_conf, fb_tags = fallback_classify_from_text(extracted_text, clf_result)
+                        print(
+                            f"[PROCESSOR] Qwen API failed/miscellaneous — using content fallback: "
+                            f"{fb_category} ({fb_conf}% conf, tags={fb_tags})"
+                        )
+                        analysis_json_str = json.dumps({
+                            "is_blur": False,
+                            "blur_reason": None,
+                            "category": fb_category,
+                            "tags": fb_tags,
+                            "confidence": fb_conf,
+                            "metadata": {},
+                            "summary": f"Classified as {fb_category} with tags {fb_tags} based on document content.",
+                            "text": extracted_text,
+                            "_classifier": "content_bge_fallback",
+                        })
                 except (json.JSONDecodeError, Exception) as err:
                     print(f"[PROCESSOR] Degradation parse error: {err}")
 
@@ -228,7 +326,12 @@ class DocumentOrchestrator:
             print(f"[PROCESSOR] Quality check failed: {reason}")
             raise ValueError(f"Image Quality Issue: {reason} Please re-upload a clearer version.")
 
-        category = analysis.get("category", "miscellaneous")
+        summary = analysis.get("summary", "")
+        text_content = analysis.get("text", "")
+        raw_category = analysis.get("category", "miscellaneous")
+        category = canonicalize_category(raw_category, original_name, text_content)
+        if category == "report" and summary:
+            summary = re.sub(r"\ba research paper\b", "a project report", summary, flags=re.IGNORECASE)
         raw_conf = analysis.get("confidence", 0)
         try:
             conf_val = float(raw_conf)
@@ -239,8 +342,9 @@ class DocumentOrchestrator:
         except Exception:
             confidence = 0
         metadata_dict = analysis.get("metadata", {})
-        summary = analysis.get("summary", "")
-        text_content = analysis.get("text", "")
+
+        if progress_callback:
+            await progress_callback("categorizing", 70, f"Categorized as {category} ({confidence}% confidence)...")
 
         # Self-Learning Dynamic Prototype Feedback Loop:
         # When Qwen-72B or Vision LLM classifies a document, automatically train the local BGE model
@@ -259,7 +363,21 @@ class DocumentOrchestrator:
                 f"Content: {text_content or original_name}"
             )
 
+        # Tags: list of detected document types in this file
+        raw_tags = analysis.get("tags") or metadata_dict.get("tags") or []
+        if isinstance(raw_tags, str):
+            doc_tags = [t.strip().lower() for t in raw_tags.split(",") if t.strip()]
+        elif isinstance(raw_tags, list):
+            doc_tags = [str(t).strip().lower() for t in raw_tags if str(t).strip()]
+        else:
+            doc_tags = []
+        if category and category not in doc_tags:
+            doc_tags.append(category)
+
         # Step 3: Storage in Local Disk (USE ENCRYPTED CONTENT)
+        if progress_callback:
+            await progress_callback("indexing", 85, "Storing encrypted document and indexing vector embeddings...")
+
         file_key = f"{doc_id}-{original_name}"
         await self.storage.upload_file(encrypted_content, file_key, content_type)
 
@@ -267,6 +385,7 @@ class DocumentOrchestrator:
         payload = {
             "original_name": original_name,
             "category": category,
+            "tags": doc_tags,
             "confidence": confidence,
             "metadata": metadata_dict,
             "summary": summary,
@@ -338,9 +457,10 @@ class DocumentOrchestrator:
                 "year": doc_year,
                 "month": doc_month,
                 "entities": metadata_dict.get("entities", []) if isinstance(metadata_dict.get("entities"), list) else [],
-                "tags": metadata_dict.get("tags", []) if isinstance(metadata_dict.get("tags"), list) else [],
+                "tags": doc_tags,
                 "metadata": metadata_dict,
                 "bucket_path": file_key,
+                "upload_timestamp": upload_timestamp,
             }
 
             # Use chunker to split document text

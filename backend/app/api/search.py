@@ -23,53 +23,21 @@ async def get_dynamic_collections(
 ):
     """
     Fetch documents belonging to the authenticated user, grouped by AI category.
-
-    Filters Qdrant by user_id (injected from JWT) so each user sees only
-    their own collections.
+    Returns full categorized document summary across both legacy and chunk vector stores.
     """
-    user_id = current_user.get("sub")
-
     try:
-        # Filter scroll to only this user's documents
-        points, _ = vector_db.client.scroll(
-            collection_name=vector_db.collection_name,
-            scroll_filter=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="user_id",
-                        match=models.MatchValue(value=user_id),
-                    )
-                ]
-            ),
-            with_payload=True,
-            limit=200,
-        )
-
-        category_map = defaultdict(list)
-
-        for point in points:
-            payload = point.payload
-            cat_name = payload.get("category", "Unsorted")
-            file_url = f"http://localhost:8000/static/{payload.get('bucket_path', '')}"
-
-            category_map[cat_name].append({
-                "id": point.id,
-                "name": payload.get("original_name"),
-                "url": file_url,
-                "file_key": payload.get("bucket_path"),
-            })
-
-        summary = [
+        from app.api.upload import get_document_categories
+        res = await get_document_categories(current_user=current_user)
+        categories = res.get("categories", [])
+        return [
             {
-                "category_name": cat,
-                "count": len(docs),
-                "documents": docs,
+                "category_name": c["category"],
+                "display_name": c["display_name"],
+                "count": c["count"],
+                "documents": c["documents"],
             }
-            for cat, docs in category_map.items()
+            for c in categories
         ]
-
-        return summary
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

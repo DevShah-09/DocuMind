@@ -72,18 +72,16 @@ _llm_client = OpenAI(
 
 # ── System prompt ──────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = (
-    "You are a helpful personal document assistant with access to excerpts from "
-    "the user's uploaded documents (PDFs, scans, invoices, ID cards, statements, etc.). \n\n"
-    "Guidelines:\n"
-    "- Answer the user's question or fulfill their request (summarize, explain, list, compare, extract) "
-    "using ONLY the information found in the provided document excerpts.\n"
-    "- For summarization requests: produce a clear, structured summary of the document's key contents.\n"
-    "- For extraction requests (amounts, dates, names): extract and present the exact values found.\n"
-    "- Always mention which document (filename) your answer is drawn from.\n"
-    "- If multiple documents are provided, address each one separately when relevant.\n"
-    "- If the context does not contain enough information to answer, say: "
-    "'I couldn\'t find relevant information in your documents for this query.' "
-    "Do NOT make up facts or use external knowledge beyond what is in the excerpts."
+    "You are DocuMind AI, an intelligent personal document assistant. "
+    "You answer questions, explain concepts, and summarize findings using excerpts from the user's uploaded documents.\n\n"
+    "Formatting & Presentation Standards:\n"
+    "- Executive Overview: When explaining or summarizing, begin directly with a 1-2 sentence overview.\n"
+    "- Headings: Use standard markdown headers (### Section Title) for topics. Do NOT use 5 hashes (#####).\n"
+    "- Inline Bullets: Place bullet text on the same line as the bullet (e.g. '• **Initial Retrieval**: starts with...'). Never put an isolated bullet symbol on its own line.\n"
+    "- Clean Math: Write math and parameters in clean plain text (e.g. 'K0', 'x', 'theta_floor = 0.35'). Do NOT use LaTeX tags like '\\( K_0 \\)'.\n"
+    "- Clean Citations: Cite the source document once cleanly at the end (e.g. '*Source: filename.pdf*'). Do NOT repeat '(Excerpt from File: ...)' across every heading.\n"
+    "- Direct & Professional: Avoid conversational meta-preamble like 'To explain the research paper based on the provided excerpts, let\'s break down...'. Jump directly into the findings.\n"
+    "- Grounded Accuracy: Use ONLY facts from the provided excerpts."
 )
 
 _GREETING_REPLY = (
@@ -97,6 +95,29 @@ _GREETING_REPLY = (
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+import re
+
+def _extract_user_display_name(current_user: dict) -> str:
+    metadata = current_user.get("user_metadata") or {}
+    name = metadata.get("full_name") or metadata.get("name")
+    if not name and current_user.get("email"):
+        name = current_user["email"].split("@")[0]
+        name = re.sub(r"[0-9_\.]+", " ", name).strip()
+    return (name or "User").title()
+
+
+def _get_doc_upload_timestamp(doc_id: str, payload_ts: Optional[str]) -> Optional[str]:
+    if payload_ts:
+        return payload_ts
+    try:
+        from app.core.qdrant_client_singleton import shared_qdrant_client
+        pts = shared_qdrant_client.retrieve(collection_name="user_documents", ids=[doc_id])
+        if pts and pts[0].payload:
+            return pts[0].payload.get("upload_timestamp")
+    except Exception:
+        pass
+    return None
+
 
 def _build_context(chunks: list) -> str:
     parts: List[str] = []
@@ -114,7 +135,17 @@ def _build_context(chunks: list) -> str:
     return "\n\n".join(parts)
 
 
-def _call_llm(user_query: str, context: str) -> str:
+def _call_llm(user_query: str, context: str, history: Optional[List[Any]] = None) -> str:
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    # Append recent conversation turns for context continuity (like ChatGPT)
+    if history:
+        for msg in history[-6:]:
+            role = getattr(msg, "role", None) or (msg.get("role") if isinstance(msg, dict) else "user")
+            text = getattr(msg, "content", None) or (msg.get("content") if isinstance(msg, dict) else "")
+            if role in ("user", "assistant") and text:
+                messages.append({"role": role, "content": text[:1500]})
+
     if context:
         user_message = (
             f"The following are excerpts from the user's documents:\n\n"
@@ -128,12 +159,11 @@ def _call_llm(user_query: str, context: str) -> str:
             "Please let the user know politely and suggest they upload relevant documents."
         )
 
+    messages.append({"role": "user", "content": user_message})
+
     response = _llm_client.chat.completions.create(
         model=CHAT_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
+        messages=messages,
         max_tokens=1200,
         temperature=0.2,
     )
@@ -226,7 +256,8 @@ async def chat(
 
     try:
         # ── 2. Parse query & embed in parallel ────────────────────────────────
-        parsed_task = query_parser.parse(request.query)
+        user_name = _extract_user_display_name(current_user)
+        parsed_task = query_parser.parse(request.query, user_name=user_name)
         embed_task  = embedding_service.embed_query(request.query)
 
         parsed, query_vector = await asyncio.gather(parsed_task, embed_task)
@@ -250,7 +281,11 @@ async def chat(
         t_retrieval_start = time.monotonic()
         dynamic_k_diag: Optional[DynamicKDiagnostics] = None
 
-        probe_limit = DYNAMIC_K_PROBE_SIZE if request.dynamic_k_enabled else request.limit * 4
+        is_all_query = bool(re.search(r"\b(all|every|complete|entire)\b", request.query, re.IGNORECASE))
+        if is_all_query:
+            probe_limit = 35
+        else:
+            probe_limit = DYNAMIC_K_PROBE_SIZE if request.dynamic_k_enabled else request.limit * 4
 
         raw_chunks = await qdrant_store.search_chunks(
             query_vector=query_vector,
@@ -260,10 +295,27 @@ async def chat(
             score_threshold=request.score_threshold,
         )
 
-        # ── 4a. Retry without doc-type filter if probe returned nothing ────────
-        if not raw_chunks and parsed.document_type:
+        # ── Determine intent early: analysis vs. document fetch ──────────────
+        q_lower = request.query.lower().strip()
+        _analysis_kw = {
+            "summarize", "summary", "explain", "what is", "what are", "what was", "what were",
+            "how much", "how many", "total", "details", "compare", "why", "list all", "extract",
+            "reading", "calculate", "who is", "who was", "when did", "date of", "score",
+            "marks", "grade", "result", "percentage", "cgpa", "sgpa", "status", "due",
+            "fee", "fees", "cost", "price", "amount", "number", "account number",
+            "tell me", "show me details", "find out",
+        }
+        _question_starters = (
+            "what", "who", "when", "where", "why", "how", "which",
+            "is ", "are ", "was ", "were ", "can ", "does ", "did ", "do ", "has ", "have "
+        )
+        requires_llm = any(kw in q_lower for kw in _analysis_kw) or q_lower.startswith(_question_starters) or q_lower.endswith("?")
+
+        # ── 4a. Retry without doc-type filter ONLY if analytical query ────────
+        type_relaxed = False
+        if not raw_chunks and parsed.document_type and requires_llm:
             logger.info(
-                "[CHAT] No chunks for document_type=%r; retrying without type filter",
+                "[CHAT] No chunks for document_type=%r; retrying for LLM question",
                 parsed.document_type,
             )
             relaxed = {k: v for k, v in effective_filters.items() if k != "document_type"}
@@ -277,8 +329,35 @@ async def chat(
             if retry_chunks:
                 raw_chunks = retry_chunks
                 effective_filters = relaxed
+                type_relaxed = True
 
-        # ── 4b. Legacy collection fallback ────────────────────────────────────
+        # If continuing an ongoing conversation, automatically treat as analytical LLM question
+        if request.history and len(request.history) > 0:
+            requires_llm = True
+
+        # ── 4b. Active Document Continuity (Connect follow-up questions to current topic) ──
+        active_doc_ids = list(request.active_document_ids or [])
+        if active_doc_ids:
+            for active_id in active_doc_ids[:2]:
+                active_filters = {"user_id": user_id, "document_id": active_id}
+                if parsed.document_type and not type_relaxed:
+                    active_filters["document_type"] = parsed.document_type
+                active_chunks = await qdrant_store.search_chunks(
+                    query_vector=query_vector,
+                    user_id=user_id,
+                    filters=active_filters,
+                    limit=probe_limit,
+                    score_threshold=request.score_threshold,
+                )
+                if active_chunks:
+                    existing_cids = {getattr(c, "id", None) or (c.payload or {}).get("chunk_id") for c in raw_chunks}
+                    for ac in active_chunks:
+                        acid = getattr(ac, "id", None) or (ac.payload or {}).get("chunk_id")
+                        if acid not in existing_cids:
+                            raw_chunks.append(ac)
+                            existing_cids.add(acid)
+
+        # ── 4c. Legacy collection fallback ────────────────────────────────────
         if not raw_chunks:
             vdb    = VectorDBService()
             legacy = await vdb.search(
@@ -364,11 +443,32 @@ async def chat(
                 did = p.get("document_id") or p.get("filename") or p.get("original_name") or f"doc_{idx}"
                 doc_chunks[str(did)].append(chunk)
 
-            sorted_docs = sorted(
-                doc_chunks.items(),
-                key=lambda item: max((c.score for c in item[1]), default=0.0),
-                reverse=True,
-            )
+            # By default (unless user explicitly said 'all' or 'both'), assume user wants the LATEST document
+            is_latest_query = not is_all_query or getattr(parsed, "is_latest", False)
+            if is_latest_query:
+                # Order documents by upload timestamp descending, then by score
+                def _doc_recency_key(item):
+                    chunks = item[1]
+                    max_score = max((c.score for c in chunks), default=0.0)
+                    ts = None
+                    for c in chunks:
+                        cp = c.payload or {}
+                        ts = cp.get("upload_timestamp") or _get_doc_upload_timestamp(str(item[0]), None)
+                        if ts:
+                            break
+                    return (ts or "", max_score)
+                sorted_docs = sorted(doc_chunks.items(), key=_doc_recency_key, reverse=True)
+            else:
+                def _doc_relevance_key(item):
+                    chunks = item[1]
+                    max_score = max((c.score for c in chunks), default=0.0)
+                    return max_score
+
+                sorted_docs = sorted(
+                    doc_chunks.items(),
+                    key=_doc_relevance_key,
+                    reverse=True,
+                )
 
             best_doc_score = max(
                 (max(c.score for c in item[1]) for item in sorted_docs),
@@ -378,22 +478,43 @@ async def chat(
 
             selected_chunks: list = []
             selected_doc_count = 0
+            is_all_query = bool(re.search(r"\b(all|every|complete|entire|both|compare|list all|across)\b", request.query, re.IGNORECASE))
+            if is_all_query:
+                # User explicitly requested all matching documents
+                target_doc_cap = max(15, len(sorted_docs))
+                recommended_chunk_cap = max(30, decision.recommended_k)
+            else:
+                # When user hasn't specified: assume they want the single LATEST document
+                target_doc_cap = 1
+                recommended_chunk_cap = max(6, decision.recommended_k)
+
             for doc_id, chunks_for_doc in sorted_docs:
                 top_score = max((c.score for c in chunks_for_doc), default=0.0)
                 if top_score < min_doc_score:
                     continue
-                if selected_doc_count >= decision.target_documents:
+                # If document_type filter is active and not relaxed, ensure document matches it
+                if parsed.document_type and not type_relaxed:
+                    req_type = parsed.document_type.lower()
+                    doc_matches = any(
+                        ((c.payload or {}).get("document_type", "").lower() == req_type or
+                         req_type in [str(t).lower() for t in (c.payload or {}).get("tags", [])])
+                        for c in chunks_for_doc
+                    )
+                    if not doc_matches:
+                        continue
+                if selected_doc_count >= target_doc_cap:
                     break
-                if len(selected_chunks) >= decision.recommended_k:
+                if len(selected_chunks) >= recommended_chunk_cap:
                     break
                 best_for_doc = sorted(chunks_for_doc, key=lambda c: c.score, reverse=True)
-                selected_chunks.extend(best_for_doc[: decision.chunks_per_document])
+                chunks_to_take = (recommended_chunk_cap - len(selected_chunks)) if target_doc_cap == 1 else max(decision.chunks_per_document, 2 if is_all_query else 1)
+                selected_chunks.extend(best_for_doc[:chunks_to_take])
                 selected_doc_count += 1
 
             if not selected_chunks and raw_chunks:
-                selected_chunks = sorted(raw_chunks, key=lambda c: c.score, reverse=True)[: decision.recommended_k]
+                selected_chunks = sorted(raw_chunks, key=lambda c: c.score, reverse=True)[: recommended_chunk_cap]
 
-            top_chunks = sorted(selected_chunks, key=lambda c: c.score, reverse=True)[: decision.recommended_k]
+            top_chunks = sorted(selected_chunks, key=lambda c: c.score, reverse=True)[: recommended_chunk_cap]
 
         else:
             # ── Static fallback: top-4 per document up to limit * 4 ───────────
@@ -412,14 +533,35 @@ async def chat(
 
         retrieval_latency_ms = round((time.monotonic() - t_retrieval_start) * 1000, 2)
 
-        # ── 8. Determine intent: analysis vs. document fetch ──────────────────
-        q_lower = request.query.lower().strip()
-        _analysis_kw = {
-            "summarize", "summary", "explain", "what is", "what are", "how much",
-            "total", "details", "compare", "why", "list all", "extract", "reading",
-            "calculate", "who is", "when did", "date of",
-        }
-        requires_llm = any(kw in q_lower for kw in _analysis_kw) or q_lower.endswith("?")
+        # ── 8. Entity & Document Type Verification ────────────────────────────
+        # If entities were specified (e.g., 'dhruv'), prioritize chunks matching the entity
+        if parsed.entities:
+            entity_matched = []
+            for c in top_chunks:
+                p = c.payload or {}
+                haystack = f"{p.get('filename', '')} {p.get('summary', '')} {p.get('text', '')} {' '.join(p.get('entities', []))}".lower()
+                if any(e.lower() in haystack for e in parsed.entities):
+                    entity_matched.append(c)
+            if entity_matched:
+                top_chunks = entity_matched
+            else:
+                logger.info("[CHAT] Entity filter %r had no exact matches; preserving top semantic chunks", parsed.entities)
+
+        # If document_type was specified and not relaxed, ensure chunks match that document_type OR have it in their tags
+        if parsed.document_type and not type_relaxed:
+            req_type = parsed.document_type.lower()
+            def _matches_type(c):
+                p = c.payload or {}
+                chunk_type = p.get("document_type", "").lower()
+                chunk_tags = [str(t).lower() for t in p.get("tags", [])]
+                return chunk_type == req_type or req_type in chunk_tags
+            type_matched = [c for c in top_chunks if _matches_type(c)]
+            if type_matched:
+                top_chunks = type_matched
+            else:
+                raw_type_matched = [c for c in raw_chunks if _matches_type(c)]
+                if raw_type_matched:
+                    top_chunks = sorted(raw_type_matched, key=lambda c: c.score, reverse=True)[:recommended_chunk_cap]
 
         # ── 9. Build source list ───────────────────────────────────────────────
         seen_doc_ids: Dict[str, bool] = {}
@@ -430,47 +572,107 @@ async def chat(
             if not doc_id or doc_id in seen_doc_ids:
                 continue
             seen_doc_ids[str(doc_id)] = True
+            upload_ts = _get_doc_upload_timestamp(str(doc_id), p.get("upload_timestamp"))
+            doc_fn = p.get("filename", p.get("original_name", "document"))
+            raw_dtype = p.get("document_type", "document")
+            doc_sum = p.get("summary", "")
+            if "report" in doc_fn.lower():
+                if raw_dtype in ("research_paper", "academic_paper"):
+                    raw_dtype = "report"
+                doc_sum = re.sub(r"\ba research paper\b", "a project report", doc_sum, flags=re.IGNORECASE)
+
             sources.append(ChatSource(
                 document_id=str(doc_id),
-                filename=p.get("filename", p.get("original_name", "document")),
-                document_type=p.get("document_type", "document"),
-                summary=p.get("summary", ""),
+                filename=doc_fn,
+                document_type=raw_dtype,
+                summary=doc_sum,
                 score=round(chunk.score, 4),
                 year=p.get("year"),
                 month=p.get("month"),
+                upload_timestamp=upload_ts,
                 preview_url="",
             ))
 
-        sources = sources[: max(5, request.limit)]
+        # Filter out weak/spurious matches below confidence floor
+        MIN_CONFIDENCE_SCORE = max(request.score_threshold, 0.35)
+        valid_sources = [s for s in sources if s.score >= MIN_CONFIDENCE_SCORE]
+        if valid_sources:
+            sources = valid_sources
+        elif sources and top_chunks:
+            sources = [max(sources, key=lambda s: s.score)]
+
+        # ── Handle default-to-latest document selection ────────────────────────
+        if sources:
+            # Sort descending by upload_timestamp so newest document is always first
+            def _recency_key(s: ChatSource):
+                return (s.upload_timestamp or "", s.score)
+            sources.sort(key=_recency_key, reverse=True)
+
+            def _chunk_recency_key(c):
+                cp = c.payload or {}
+                return (cp.get("upload_timestamp") or "", c.score)
+            top_chunks.sort(key=_chunk_recency_key, reverse=True)
+
+            # Unless user explicitly requested multiple docs (all/both/compare), isolate to the single LATEST document
+            if not is_all_query and not getattr(parsed, "year", None):
+                latest_doc = sources[0]
+                sources = [latest_doc]
+                top_chunks = [c for c in top_chunks if (c.payload or {}).get("document_id") == latest_doc.document_id or (c.payload or {}).get("filename") == latest_doc.filename]
+            else:
+                max_sources = 25 if is_all_query else max(5, request.limit)
+                sources = sources[:max_sources]
 
         # ── 10. Generate answer ────────────────────────────────────────────────
         if not requires_llm:
             if sources:
                 best = sources[0]
                 pct  = int(round(best.score * 100))
-                answer = (
-                    f"Found {len(sources)} matching document"
-                    f"{'s' if len(sources) > 1 else ''} for \"{request.query}\". "
-                    f"Best match: **{best.filename}** ({pct}% relevance)."
-                )
+                if getattr(parsed, "is_latest", False):
+                    answer = (
+                        f"Found latest matching document for \"{request.query}\". "
+                        f"Best match: **{best.filename}** (latest version)."
+                    )
+                else:
+                    answer = (
+                        f"Found {len(sources)} matching document"
+                        f"{'s' if len(sources) > 1 else ''} for \"{request.query}\". "
+                        f"Best match: **{best.filename}** ({pct}% relevance)."
+                    )
             else:
-                answer = (
-                    f"No documents matched \"{request.query}\". "
-                    "Try a different query or upload more documents."
-                )
+                if parsed.document_type and not type_relaxed:
+                    pretty_type = parsed.document_type.replace('_', ' ').title()
+                    answer = f"No {pretty_type} documents were found in your uploaded collection."
+                elif parsed.entities:
+                    ents_str = ", ".join(f"'{e}'" for e in parsed.entities)
+                    answer = f"No documents found matching {ents_str} in your uploaded collection."
+                else:
+                    answer = (
+                        f"No documents matched \"{request.query}\". "
+                        "Try a different query or upload more documents."
+                    )
         else:
-            context_tuples = [
-                (
-                    (chunk.payload or {}).get("filename", "document"),
-                    (chunk.payload or {}).get("document_type", "document"),
-                    (chunk.payload or {}).get("text", (chunk.payload or {}).get("text_content", "")),
-                    (chunk.payload or {}).get("page_number", 1),
-                )
-                for chunk in top_chunks
-            ]
-            context_str = _build_context(context_tuples)
-            loop        = asyncio.get_event_loop()
-            answer      = await loop.run_in_executor(None, _call_llm, request.query, context_str)
+            if not top_chunks or not sources:
+                if parsed.document_type and not type_relaxed:
+                    pretty_type = parsed.document_type.replace('_', ' ').title()
+                    answer = f"I couldn't find any {pretty_type} documents in your uploaded collection to answer this query."
+                elif parsed.entities:
+                    ents_str = ", ".join(f"'{e}'" for e in parsed.entities)
+                    answer = f"I couldn't find any documents related to {ents_str} in your uploaded collection."
+                else:
+                    answer = "I couldn't find relevant information in your documents for this query."
+            else:
+                context_tuples = [
+                    (
+                        (chunk.payload or {}).get("filename", "document"),
+                        (chunk.payload or {}).get("document_type", "document"),
+                        (chunk.payload or {}).get("text", (chunk.payload or {}).get("text_content", "")),
+                        (chunk.payload or {}).get("page_number", 1),
+                    )
+                    for chunk in top_chunks
+                ]
+                context_str = _build_context(context_tuples)
+                loop        = asyncio.get_event_loop()
+                answer      = await loop.run_in_executor(None, _call_llm, request.query, context_str, request.history)
 
         total_latency_ms = round((time.monotonic() - t0) * 1000, 2)
 

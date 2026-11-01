@@ -490,8 +490,8 @@ class DynamicTopKController:
         return (
             f"C_q={c_q:.2f}({cq_label}), R_c={r_c:.2f}({rc_label}) "
             f"[S_top={s_top:.2f}, knee={knee_gap:.2f}@{knee_index}] "
-            f"→ demand={combined_demand:.2f}{penalty_str} "
-            f"→ K={recommended_k}{shortcut_str} "
+            f"-> demand={combined_demand:.2f}{penalty_str} "
+            f"-> K={recommended_k}{shortcut_str} "
             f"across {target_docs} doc(s) (max {chunks_per_doc}/doc) "
             f"[{stop_reason}]"
         )

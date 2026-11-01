@@ -164,6 +164,8 @@ CATEGORY_ANCHORS: Dict[str, List[str]] = {
     "report": [
         "Project Report Executive Summary Technical Report Table of Contents Overview Findings Recommendations Analysis",
         "Final Report Status Report Performance Analysis System Specifications Functional Requirements Architecture",
+        "Innovative Product Development IPD Course Project Report University of Mumbai Department Engineering",
+        "Project Report Submitted In Partial Fulfillment Requirements Course Capstone Project Documentation",
     ],
     "resume": [
         # Header — contact details unique to resumes
@@ -399,9 +401,9 @@ class LocalBGEClassifier:
         accepted = (top_score >= score_threshold) and (margin >= margin_threshold)
 
         logger.info(
-            "[CLASSIFIER] top=%s (%.4f) second=%s (%.4f) margin=%.4f → %s",
+            "[CLASSIFIER] top=%s (%.4f) second=%s (%.4f) margin=%.4f -> %s",
             top_cat, top_score, second_cat, second_score, margin,
-            "ACCEPTED" if accepted else "FALLBACK→Qwen-72B",
+            "ACCEPTED" if accepted else "FALLBACK->Qwen-72B",
         )
 
         return ClassifierResult(

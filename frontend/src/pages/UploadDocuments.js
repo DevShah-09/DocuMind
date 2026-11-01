@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Upload, FileText, File, CheckCircle2, Loader2,
-  AlertCircle, Tag, Percent, Info, ChevronDown, ChevronUp, X
+  AlertCircle, Tag, Percent, Info, ChevronDown, ChevronUp, X, Ban
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -184,38 +184,52 @@ const ResultCard = ({ result, onRemove }) => {
 // ── Main Component ───────────────────────────────────────────────────────────
 const MAX_CONCURRENT_UPLOADS = 3;
 
-const UploadDocuments = ({ queue, setQueue }) => {
+const UploadDocuments = ({ queue, setQueue, onUploadComplete }) => {
   const [dragActive, setDragActive] = useState(false);
   const { getAccessToken }          = useAuth();
   const fileInputRef                = useRef(null);
   const activeProcessingRef         = useRef(new Set());
+  // Map of itemId -> { abortController, eventSource } for cancellation
+  const cancellationRef             = useRef({});
 
   const isProcessing = queue.some(item => item.status === 'processing');
+
+  // ── Cancel handler ─────────────────────────────────────────────────────────
+  const handleCancel = useCallback((itemId) => {
+    const handles = cancellationRef.current[itemId];
+    if (handles) {
+      // Abort the fetch if still in-flight
+      if (handles.abortController) {
+        handles.abortController.abort();
+      }
+      // Close SSE stream if open
+      if (handles.eventSource) {
+        handles.eventSource.close();
+        handles.eventSource = null;
+      }
+      delete cancellationRef.current[itemId];
+    }
+    activeProcessingRef.current.delete(itemId);
+    setQueue(prev =>
+      prev.map(item =>
+        item.id === itemId
+          ? { ...item, status: 'cancelled', error: 'Upload cancelled' }
+          : item
+      )
+    );
+    toast.info('Upload cancelled.');
+  }, [setQueue]);
 
   const processQueueItem = useCallback(async (itemToProcess) => {
     // Mark item as actively processing in state
     setQueue(prev => prev.map(item =>
-      item.id === itemToProcess.id ? { ...item, status: 'processing', stageIndex: 0, progress: 0 } : item
+      item.id === itemToProcess.id ? { ...item, status: 'processing', stageIndex: 0, progress: 5 } : item
     ));
 
-    // Simulated stage ticker per item
-    let currentStage = 0;
-    const ticker = setInterval(() => {
-      currentStage += 1;
-      if (currentStage >= STAGES.length - 1) {
-        clearInterval(ticker);
-      } else {
-        setQueue(prev => prev.map(item =>
-          item.id === itemToProcess.id
-            ? {
-                ...item,
-                stageIndex: currentStage,
-                progress: Math.min(90, Math.round((currentStage / (STAGES.length - 1)) * 90))
-              }
-            : item
-        ));
-      }
-    }, 2000);
+    const abortController = new AbortController();
+    cancellationRef.current[itemToProcess.id] = { abortController, eventSource: null };
+
+    let activeEventSource = null;
 
     try {
       const formData = new FormData();
@@ -228,41 +242,154 @@ const UploadDocuments = ({ queue, setQueue }) => {
           'Authorization': `Bearer ${token}`
         },
         body: formData,
+        signal: abortController.signal,
       });
-
-      clearInterval(ticker);
 
       if (!response.ok) {
         const errData = await response.json().catch(() => ({ detail: 'Unknown error' }));
         throw new Error(errData.detail || `Server error: ${response.status}`);
       }
 
-      const json = await response.json();
-      const data = json.data;
+      const uploadInit = await response.json();
 
-      // Update item status to done with the result
-      setQueue(prev => prev.map(item =>
-        item.id === itemToProcess.id
-          ? {
-              ...item,
-              status: 'done',
-              stageIndex: STAGES.length - 1,
-              progress: 100,
-              result: {
-                id: data.id,
-                original_name: data.original_name,
-                category: data.category,
-                confidence: data.confidence,
-                summary: data.summary,
-                metadata: data.metadata || {},
+      // If backend returned immediate synchronous result (sync fallback)
+      if (uploadInit.data && !uploadInit.job_id) {
+        const data = uploadInit.data;
+        delete cancellationRef.current[itemToProcess.id];
+        setQueue(prev => prev.map(item =>
+          item.id === itemToProcess.id
+            ? {
+                ...item,
+                status: 'done',
+                stageIndex: STAGES.length - 1,
+                progress: 100,
+                result: {
+                  id: data.id,
+                  original_name: data.original_name,
+                  category: data.category,
+                  confidence: data.confidence,
+                  summary: data.summary,
+                  metadata: data.metadata || {},
+                }
               }
-            }
-          : item
-      ));
+            : item
+        ));
+        toast.success(`"${itemToProcess.name}" categorized as "${getCategoryMeta(data.category).label}"!`);
+        if (typeof onUploadComplete === 'function') {
+          onUploadComplete();
+        }
+        window.dispatchEvent(new CustomEvent('documind:collections_updated'));
+        try {
+          const ch = new BroadcastChannel('documind_events');
+          ch.postMessage({ type: 'COLLECTIONS_UPDATED' });
+          ch.close();
+        } catch (_) {}
+        return;
+      }
 
-      toast.success(`"${itemToProcess.name}" categorized as "${getCategoryMeta(data.category).label}"!`);
+      // Genuine SSE Pipeline Stream via EventSource
+      const jobId = uploadInit.job_id;
+      const sseUrl = `http://localhost:8000/documents/upload/${jobId}/events?token=${encodeURIComponent(token)}`;
+
+      await new Promise((resolve, reject) => {
+        const es = new EventSource(sseUrl);
+        activeEventSource = es;
+        // Keep ref for cancellation
+        if (cancellationRef.current[itemToProcess.id]) {
+          cancellationRef.current[itemToProcess.id].eventSource = es;
+        }
+
+        es.addEventListener('milestone', (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            setQueue(prev => prev.map(item =>
+              item.id === itemToProcess.id
+                ? {
+                    ...item,
+                    stageIndex: typeof payload.stageIndex === 'number' ? payload.stageIndex : item.stageIndex,
+                    progress: typeof payload.progress === 'number' ? payload.progress : item.progress,
+                  }
+                : item
+            ));
+          } catch (e) {
+            console.error('[SSE] Failed to parse milestone:', e);
+          }
+        });
+
+        es.addEventListener('done', (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            const data = payload.data || {};
+            es.close();
+            activeEventSource = null;
+            delete cancellationRef.current[itemToProcess.id];
+
+            setQueue(prev => prev.map(item =>
+              item.id === itemToProcess.id
+                ? {
+                    ...item,
+                    status: 'done',
+                    stageIndex: STAGES.length - 1,
+                    progress: 100,
+                    result: {
+                      id: data.id,
+                      original_name: data.original_name,
+                      category: data.category,
+                      confidence: data.confidence,
+                      summary: data.summary,
+                      metadata: data.metadata || {},
+                    }
+                  }
+                : item
+            ));
+            toast.success(`"${itemToProcess.name}" categorized as "${getCategoryMeta(data.category).label}"!`);
+            if (typeof onUploadComplete === 'function') {
+              onUploadComplete();
+            }
+            window.dispatchEvent(new CustomEvent('documind:collections_updated'));
+            try {
+              const ch = new BroadcastChannel('documind_events');
+              ch.postMessage({ type: 'COLLECTIONS_UPDATED' });
+              ch.close();
+            } catch (_) {}
+            resolve(data);
+          } catch (err) {
+            es.close();
+            activeEventSource = null;
+            reject(err);
+          }
+        });
+
+        es.addEventListener('error', (event) => {
+          try {
+            if (event.data) {
+              const payload = JSON.parse(event.data);
+              es.close();
+              activeEventSource = null;
+              reject(new Error(payload.message || payload.error || 'Upload processing failed'));
+              return;
+            }
+          } catch (_) {}
+
+          // If connection was closed or encountered network terminal failure
+          if (es.readyState === EventSource.CLOSED) {
+            es.close();
+            activeEventSource = null;
+            reject(new Error('Connection to upload stream interrupted.'));
+          }
+        });
+      });
+
     } catch (err) {
-      clearInterval(ticker);
+      if (activeEventSource) {
+        activeEventSource.close();
+        activeEventSource = null;
+      }
+      delete cancellationRef.current[itemToProcess.id];
+
+      // If aborted by user cancel, skip setting error state (handleCancel already set it)
+      if (err.name === 'AbortError') return;
+
       console.error(err);
       const msg = err.message.includes('fetch')
         ? 'Cannot reach backend. Is the server running on port 8000?'
@@ -281,7 +408,7 @@ const UploadDocuments = ({ queue, setQueue }) => {
       // Trigger next tick for any remaining pending items
       setQueue(prev => [...prev]);
     }
-  }, [getAccessToken, setQueue]);
+  }, [getAccessToken, setQueue, onUploadComplete]);
 
   // Parallel processing loop: dispatch up to MAX_CONCURRENT_UPLOADS items simultaneously
   useEffect(() => {
@@ -509,7 +636,7 @@ const UploadDocuments = ({ queue, setQueue }) => {
                               <div className={`p-2.5 rounded-xl flex-shrink-0 ${
                                 item.status === 'processing'
                                   ? 'bg-violet-100 dark:bg-violet-900/20 text-violet-500'
-                                  : item.status === 'error'
+                                  : item.status === 'error' || item.status === 'cancelled'
                                   ? 'bg-red-100 dark:bg-red-900/20 text-red-500'
                                   : 'bg-slate-100 dark:bg-slate-800 text-slate-400'
                               }`}>
@@ -517,6 +644,8 @@ const UploadDocuments = ({ queue, setQueue }) => {
                                   <Loader2 className="w-5 h-5 animate-spin" />
                                 ) : item.status === 'error' ? (
                                   <AlertCircle className="w-5 h-5" />
+                                ) : item.status === 'cancelled' ? (
+                                  <Ban className="w-5 h-5" />
                                 ) : (
                                   <File className="w-5 h-5" />
                                 )}
@@ -570,10 +699,29 @@ const UploadDocuments = ({ queue, setQueue }) => {
                                   <span className="truncate" title={item.error}>{item.error}</span>
                                 </div>
                               )}
+
+                              {item.status === 'cancelled' && (
+                                <span className="text-xs font-medium px-2 py-1 rounded bg-red-50 dark:bg-red-900/20 text-red-400">
+                                  Cancelled
+                                </span>
+                              )}
                             </div>
 
-                            {/* Action buttons (dismiss) */}
-                            <div className="flex items-center justify-end flex-shrink-0">
+                            {/* Action buttons */}
+                            <div className="flex items-center justify-end flex-shrink-0 gap-1">
+                              {/* Cancel button — only while processing */}
+                              {item.status === 'processing' && (
+                                <button
+                                  onClick={() => handleCancel(item.id)}
+                                  className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium bg-red-50 dark:bg-red-900/20 text-red-500 hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
+                                  title="Cancel upload"
+                                >
+                                  <Ban className="w-3.5 h-3.5" />
+                                  Cancel
+                                </button>
+                              )}
+
+                              {/* Dismiss button — for pending / error / cancelled */}
                               {item.status !== 'processing' && (
                                 <button
                                   onClick={() => setQueue(prev => prev.filter(q => q.id !== item.id))}

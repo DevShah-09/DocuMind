@@ -137,8 +137,10 @@ class Ranker:
         boost = 0.0
 
         # Document type boost
-        if pq.document_type and doc.document_type:
-            if pq.document_type.lower() == doc.document_type.lower():
+        if pq.document_type:
+            doc_type_matches = bool(doc.document_type and pq.document_type.lower() == doc.document_type.lower())
+            tag_matches = any(str(t).lower() == pq.document_type.lower() for t in doc.tags) if doc.tags else False
+            if doc_type_matches or tag_matches:
                 boost += BOOST_DOC_TYPE
 
         # Year boost

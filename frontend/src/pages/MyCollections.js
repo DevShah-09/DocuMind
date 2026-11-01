@@ -1,9 +1,21 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { FolderOpen, FileText, MoreVertical, Trash2, Edit, Loader2 } from 'lucide-react';
+import {
+  FolderOpen,
+  FileText,
+  MoreVertical,
+  Trash2,
+  Edit,
+  Loader2,
+  ExternalLink,
+  Upload,
+  Plus,
+} from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -15,9 +27,8 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogFooter,
 } from '@/components/ui/dialog';
-import { ExternalLink } from 'lucide-react';
-
 import {
   AlertDialog,
   AlertDialogAction,
@@ -27,7 +38,7 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
+} from '@/components/ui/alert-dialog';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -45,19 +56,20 @@ const colorMap = {
  * persist across page navigations without re-fetching on every mount.
  */
 const MyCollections = ({ collections, setCollections, collectionsLoading, fetchCollections }) => {
+  const navigate = useNavigate();
   const [selectedCollection, setSelectedCollection] = useState(null);
   const [docToDelete, setDocToDelete] = useState(null);
+  const [colToRename, setColToRename] = useState(null);
+  const [colToDelete, setColToDelete] = useState(null);
+  const [isDeletingCol, setIsDeletingCol] = useState(false);
   const { getAccessToken } = useAuth();
 
-  // Auto-refresh collections on mount and periodically (every 10s)
+  // Fetch collections on mount — no polling interval needed
   useEffect(() => {
     fetchCollections();
-    const intervalId = setInterval(() => {
-      fetchCollections();
-    }, 10000);
-    return () => clearInterval(intervalId);
   }, [fetchCollections]);
 
+  // ── Delete single document ────────────────────────────────────────────────
   const handleDeleteDocument = async () => {
     if (!docToDelete) return;
 
@@ -65,7 +77,7 @@ const MyCollections = ({ collections, setCollections, collectionsLoading, fetchC
       const token = getAccessToken();
       const response = await fetch(`http://localhost:8000/documents/${docToDelete.id}`, {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}` }
       });
 
       if (response.ok) {
@@ -82,7 +94,6 @@ const MyCollections = ({ collections, setCollections, collectionsLoading, fetchC
         if (selectedCollection) {
           const updatedDocs = (selectedCollection.docs || []).filter(d => d.id !== docToDelete.id);
           if (updatedDocs.length === 0) {
-            // Close the dialog if the collection is now empty
             setSelectedCollection(null);
           } else {
             setSelectedCollection(prev => ({
@@ -92,8 +103,16 @@ const MyCollections = ({ collections, setCollections, collectionsLoading, fetchC
             }));
           }
         }
-        // Refresh from server after a short delay to avoid race with optimistic update
-        setTimeout(() => fetchCollections(), 300);
+        // Refresh from server after a short delay and broadcast update event
+        setTimeout(() => {
+          fetchCollections();
+          window.dispatchEvent(new CustomEvent('documind:collections_updated'));
+          try {
+            const ch = new BroadcastChannel('documind_events');
+            ch.postMessage({ type: 'COLLECTIONS_UPDATED' });
+            ch.close();
+          } catch (_) {}
+        }, 300);
       } else {
         const errJson = await response.json().catch(() => ({}));
         toast.error(errJson.detail || 'Failed to delete document');
@@ -103,6 +122,63 @@ const MyCollections = ({ collections, setCollections, collectionsLoading, fetchC
       toast.error('An error occurred while deleting: ' + error.message);
     } finally {
       setDocToDelete(null);
+    }
+  };
+
+  // ── Rename collection ─────────────────────────────────────────────────────
+  const handleRenameCollection = () => {
+    if (!colToRename || !colToRename.newName.trim()) return;
+    const trimmed = colToRename.newName.trim();
+
+    setCollections(prev =>
+      prev.map(c => (c.id === colToRename.id ? { ...c, name: trimmed } : c))
+    );
+    toast.success(`Collection renamed to "${trimmed}"`);
+    setColToRename(null);
+  };
+
+  // ── Delete entire collection ──────────────────────────────────────────────
+  const handleDeleteCollection = async () => {
+    if (!colToDelete) return;
+    setIsDeletingCol(true);
+
+    try {
+      const token = getAccessToken();
+      const docs = colToDelete.docs || [];
+      
+      // Delete documents in parallel
+      await Promise.all(
+        docs.map(doc =>
+          fetch(`http://localhost:8000/documents/${doc.id}`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${token}` },
+          }).catch(err => console.error(`Failed to delete doc ${doc.id}:`, err))
+        )
+      );
+
+      // Optimistically remove collection from local state
+      setCollections(prev => prev.filter(c => c.id !== colToDelete.id));
+      if (selectedCollection?.id === colToDelete.id) {
+        setSelectedCollection(null);
+      }
+
+      toast.success(`Collection "${colToDelete.name}" deleted successfully`);
+
+      // Refresh from server & notify channels
+      setTimeout(() => {
+        fetchCollections();
+        window.dispatchEvent(new CustomEvent('documind:collections_updated'));
+        try {
+          const ch = new BroadcastChannel('documind_events');
+          ch.postMessage({ type: 'COLLECTIONS_UPDATED' });
+          ch.close();
+        } catch (_) {}
+      }, 400);
+    } catch (err) {
+      toast.error('Failed to delete collection: ' + err.message);
+    } finally {
+      setIsDeletingCol(false);
+      setColToDelete(null);
     }
   };
 
@@ -135,31 +211,41 @@ const MyCollections = ({ collections, setCollections, collectionsLoading, fetchC
         transition={{ duration: 0.3 }}
       >
         {/* Header */}
-        <div className="mb-12 flex items-center justify-between">
+        <div className="mb-12 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <h1 className="text-4xl md:text-5xl font-bold text-slate-900 dark:text-white tracking-tight mb-3">
               My Collections
             </h1>
             <p className="text-lg text-slate-600 dark:text-slate-300 flex items-center gap-2">
               AI-categorized documents organized automatically
-              {/* Subtle background-refresh indicator */}
               {collectionsLoading && collections.length > 0 && (
                 <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
               )}
             </p>
           </div>
-          <Button
-            className="bg-gradient-to-r from-slate-900 to-slate-800 hover:from-slate-800 hover:to-slate-700 text-white"
-            data-testid="new-collection-button"
-            onClick={fetchCollections}
-            disabled={collectionsLoading}
-          >
-            {collectionsLoading
-              ? <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              : <FolderOpen className="w-4 h-4 mr-2" />
-            }
-            Refresh
-          </Button>
+
+          <div className="flex items-center gap-3">
+            <Button
+              variant="outline"
+              onClick={() => navigate('/upload')}
+              className="border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800"
+            >
+              <Upload className="w-4 h-4 mr-2" />
+              Upload Files
+            </Button>
+            <Button
+              className="bg-gradient-to-r from-slate-900 to-slate-800 hover:from-slate-800 hover:to-slate-700 text-white dark:from-slate-100 dark:to-slate-200 dark:text-slate-900 dark:hover:from-slate-200 dark:hover:to-slate-300 shadow-sm"
+              data-testid="new-collection-button"
+              onClick={fetchCollections}
+              disabled={collectionsLoading}
+            >
+              {collectionsLoading
+                ? <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                : <FolderOpen className="w-4 h-4 mr-2" />
+              }
+              Refresh
+            </Button>
+          </div>
         </div>
 
         {/* First-time loading spinner (no cached data yet) */}
@@ -169,14 +255,29 @@ const MyCollections = ({ collections, setCollections, collectionsLoading, fetchC
           </div>
         )}
 
-        {/* Empty State */}
+        {/* Empty State with Upload Action Link */}
         {!collectionsLoading && collections.length === 0 && (
-          <div className="text-center py-20 border-2 border-dashed border-slate-200 rounded-xl">
-            <p className="text-slate-500">No documents processed yet. Upload your first document to see collections.</p>
+          <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-2xl bg-white/40 dark:bg-slate-900/40 text-center p-6">
+            <div className="p-4 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-400 mb-4">
+              <FolderOpen className="w-10 h-10" strokeWidth={1.5} />
+            </div>
+            <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-200 mb-1">
+              No documents processed yet
+            </h3>
+            <p className="text-slate-500 dark:text-slate-400 text-sm max-w-sm mb-6">
+              Upload documents (PDFs, images) to see them categorized automatically into intelligent collections.
+            </p>
+            <Button
+              onClick={() => navigate('/upload')}
+              className="bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white shadow-md"
+            >
+              <Upload className="w-4 h-4 mr-2" />
+              Upload Your First Document
+            </Button>
           </div>
         )}
 
-        {/* Collections Grid — show immediately from cache */}
+        {/* Collections Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {collections.map((collection, index) => (
             <motion.div
@@ -194,15 +295,40 @@ const MyCollections = ({ collections, setCollections, collectionsLoading, fetchC
                     <div className={`p-3 rounded-lg ${colorMap[collection.color]}`}>
                       <FolderOpen className="w-6 h-6" strokeWidth={1.5} />
                     </div>
+                    {/* Fixed three-dot dropdown menu */}
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon" className="opacity-0 group-hover:opacity-100 transition-opacity">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={(e) => e.stopPropagation()}
+                          className="opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
                           <MoreVertical className="w-5 h-5" />
                         </Button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem><Edit className="w-4 h-4 mr-2" /> Rename</DropdownMenuItem>
-                        <DropdownMenuItem className="text-red-600"><Trash2 className="w-4 h-4 mr-2" /> Delete</DropdownMenuItem>
+                      <DropdownMenuContent
+                        align="end"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <DropdownMenuItem
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setColToRename({ id: collection.id, newName: collection.name });
+                          }}
+                          className="cursor-pointer gap-2"
+                        >
+                          <Edit className="w-4 h-4" /> Rename
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setColToDelete(collection);
+                          }}
+                          className="cursor-pointer gap-2 text-red-600 focus:text-red-600 dark:text-red-400"
+                        >
+                          <Trash2 className="w-4 h-4" /> Delete
+                        </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
@@ -235,7 +361,14 @@ const MyCollections = ({ collections, setCollections, collectionsLoading, fetchC
 
             <div className="flex-1 overflow-y-auto mt-4 pr-2">
               <div className="space-y-3">
-                {selectedCollection?.docs.map((doc) => (
+                {Array.from(
+                  new Map(
+                    (selectedCollection?.docs || []).map((d) => [
+                      (d.name || d.id).toLowerCase().trim(),
+                      d,
+                    ])
+                  ).values()
+                ).map((doc) => (
                   <div
                     key={doc.id}
                     className="flex items-center justify-between p-4 rounded-xl border border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors group"
@@ -279,7 +412,58 @@ const MyCollections = ({ collections, setCollections, collectionsLoading, fetchC
           </DialogContent>
         </Dialog>
 
-        {/* Delete Confirmation Dialog */}
+        {/* Rename Collection Dialog */}
+        <Dialog open={!!colToRename} onOpenChange={(open) => !open && setColToRename(null)}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>Rename Collection</DialogTitle>
+            </DialogHeader>
+            <div className="py-4">
+              <Input
+                value={colToRename?.newName || ''}
+                onChange={(e) =>
+                  setColToRename(prev => prev ? { ...prev, newName: e.target.value } : null)
+                }
+                placeholder="Enter new collection name"
+                onKeyDown={(e) => e.key === 'Enter' && handleRenameCollection()}
+                autoFocus
+              />
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setColToRename(null)}>
+                Cancel
+              </Button>
+              <Button onClick={handleRenameCollection}>
+                Save Name
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Delete Collection Confirmation Dialog */}
+        <AlertDialog open={!!colToDelete} onOpenChange={(open) => !open && setColToDelete(null)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete Collection?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This will delete <span className="font-semibold text-slate-900 dark:text-white">"{colToDelete?.name}"</span> and all {colToDelete?.documents || 0} associated document(s) permanently.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={isDeletingCol}>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={handleDeleteCollection}
+                disabled={isDeletingCol}
+                className="bg-red-600 hover:bg-red-700 text-white"
+              >
+                {isDeletingCol ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+                Delete Collection
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        {/* Delete Single Document Confirmation Dialog */}
         <AlertDialog open={!!docToDelete} onOpenChange={(open) => !open && setDocToDelete(null)}>
           <AlertDialogContent>
             <AlertDialogHeader>

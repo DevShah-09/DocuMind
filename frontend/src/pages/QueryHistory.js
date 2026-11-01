@@ -70,12 +70,21 @@ function InlineRename({ value, onSave, onCancel }) {
 const QueryHistory = () => {
   const navigate = useNavigate();
   const { getAccessToken } = useAuth();
-  const [history, setHistory] = useState([]);
+  // Synchronously initialize from local storage cache so there is ZERO delay / flash of empty screen
+  const [history, setHistory] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('qi_history') || '[]');
+    } catch {
+      return [];
+    }
+  });
+  const [isLoading, setIsLoading] = useState(true);
   const [editingId, setEditingId] = useState(null); // id of item being renamed
 
-  // Load history from API (fallback to localStorage) on mount
+  // Load history from API (reconciling with localStorage)
   useEffect(() => {
     let isMounted = true;
+
     async function loadHistory() {
       const token = getAccessToken();
       if (token) {
@@ -85,9 +94,24 @@ const QueryHistory = () => {
           });
           if (res.ok) {
             const data = await res.json();
-            if (isMounted && Array.isArray(data) && data.length > 0) {
-              setHistory(data);
-              try { localStorage.setItem('qi_history', JSON.stringify(data)); } catch { /* ignore */ }
+            if (isMounted && Array.isArray(data)) {
+              if (data.length > 0) {
+                setHistory(data);
+                try { localStorage.setItem('qi_history', JSON.stringify(data)); } catch { /* ignore */ }
+              } else {
+                // If remote is empty, check local storage
+                try {
+                  const stored = JSON.parse(localStorage.getItem('qi_history') || '[]');
+                  if (stored.length > 0) {
+                    setHistory(stored);
+                  } else {
+                    setHistory([]);
+                  }
+                } catch {
+                  setHistory([]);
+                }
+              }
+              setIsLoading(false);
               return;
             }
           }
@@ -95,16 +119,36 @@ const QueryHistory = () => {
           console.error('Failed to fetch remote history:', err);
         }
       }
-      // Fallback to local storage if offline or endpoint empty
+
+      // Fallback to local storage if offline or not logged in
       try {
         const stored = JSON.parse(localStorage.getItem('qi_history') || '[]');
         if (isMounted) setHistory(stored);
       } catch {
         if (isMounted) setHistory([]);
+      } finally {
+        if (isMounted) setIsLoading(false);
       }
     }
+
     loadHistory();
-    return () => { isMounted = false; };
+
+    // Listen for instant local updates from queries executed in QueryInterface
+    const handleLocalUpdate = () => {
+      try {
+        const stored = JSON.parse(localStorage.getItem('qi_history') || '[]');
+        setHistory(stored);
+      } catch { /* ignore */ }
+    };
+
+    window.addEventListener('qi_history_updated', handleLocalUpdate);
+    window.addEventListener('storage', handleLocalUpdate);
+
+    return () => {
+      isMounted = false;
+      window.removeEventListener('qi_history_updated', handleLocalUpdate);
+      window.removeEventListener('storage', handleLocalUpdate);
+    };
   }, [getAccessToken]);
 
   const persist = (updated, updatedItem = null) => {
@@ -204,8 +248,23 @@ const QueryHistory = () => {
           )}
         </div>
 
-        {/* Empty State */}
-        {history.length === 0 && (
+        {/* Loading State */}
+        {isLoading && history.length === 0 && (
+          <div className="max-w-4xl mx-auto space-y-4">
+            {[1, 2, 3].map((n) => (
+              <div key={n} className="p-6 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 animate-pulse flex items-center justify-between">
+                <div className="space-y-2 flex-1">
+                  <div className="h-5 bg-slate-200 dark:bg-slate-700 rounded w-1/3" />
+                  <div className="h-3 bg-slate-100 dark:bg-slate-800 rounded w-1/4" />
+                </div>
+                <div className="h-8 w-20 bg-slate-100 dark:bg-slate-800 rounded-lg" />
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Empty State with Action Link */}
+        {!isLoading && history.length === 0 && (
           <div className="flex flex-col items-center justify-center py-24 border-2 border-dashed border-slate-200 dark:border-slate-700 rounded-xl">
             <div className="p-5 rounded-2xl bg-slate-100 dark:bg-slate-800 mb-5">
               <Search className="w-10 h-10 text-slate-400" strokeWidth={1.5} />
@@ -213,9 +272,16 @@ const QueryHistory = () => {
             <h2 className="text-xl font-semibold text-slate-700 dark:text-slate-300 mb-2">
               No queries yet
             </h2>
-            <p className="text-slate-500 dark:text-slate-400 text-sm text-center max-w-sm">
+            <p className="text-slate-500 dark:text-slate-400 text-sm text-center max-w-sm mb-6">
               Your search history will appear here after you run queries on the Query page.
             </p>
+            <Button
+              onClick={() => navigate('/query')}
+              className="bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white shadow-md"
+            >
+              <Search className="w-4 h-4 mr-2" />
+              Start a New Search
+            </Button>
           </div>
         )}
 
@@ -312,8 +378,10 @@ const QueryHistory = () => {
                             <Button
                               variant="ghost"
                               size="icon"
-                              className="opacity-0 group-hover:opacity-100 transition-opacity"
+                              className="opacity-0 group-hover:opacity-100 transition-opacity hover:text-cyan-600 hover:bg-cyan-50 dark:hover:bg-cyan-900/20"
                               data-testid={`view-query-${item.id}`}
+                              onClick={(e) => { e.stopPropagation(); handleRerun(item); }}
+                              title="Re-run query"
                             >
                               <ChevronRight className="w-5 h-5" />
                             </Button>

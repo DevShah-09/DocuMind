@@ -1,13 +1,57 @@
+import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Moon, Sun, Zap, Brain, Gauge, Shield } from 'lucide-react';
+import { Moon, Sun, Zap, Brain, Gauge, RotateCcw, Save } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Button } from '@/components/ui/button';
+import { toast } from 'sonner';
+
+const DEFAULT_SETTINGS = {
+  languageModel: 'gpt4',
+  embeddingModel: 'openai',
+  useReranker: true,
+  showReasoning: false,
+  strictContext: true,
+  chunkSize: 'medium',
+  topK: '5',
+};
 
 const Settings = ({ darkMode, toggleDarkMode }) => {
+  const [settings, setSettings] = useState(() => {
+    try {
+      const stored = localStorage.getItem('documind:settings');
+      return stored ? { ...DEFAULT_SETTINGS, ...JSON.parse(stored) } : DEFAULT_SETTINGS;
+    } catch {
+      return DEFAULT_SETTINGS;
+    }
+  });
+
+  const updateSetting = (key, value) => {
+    setSettings((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleSave = () => {
+    try {
+      localStorage.setItem('documind:settings', JSON.stringify(settings));
+      toast.success('Settings saved successfully!');
+    } catch (err) {
+      toast.error('Failed to save settings: ' + err.message);
+    }
+  };
+
+  const handleReset = () => {
+    setSettings(DEFAULT_SETTINGS);
+    try {
+      localStorage.setItem('documind:settings', JSON.stringify(DEFAULT_SETTINGS));
+      toast.info('Settings reset to default values');
+    } catch (err) {
+      toast.error('Failed to reset settings: ' + err.message);
+    }
+  };
+
   return (
     <div className="px-8 py-12" data-testid="settings">
       <motion.div
@@ -62,7 +106,10 @@ const Settings = ({ darkMode, toggleDarkMode }) => {
             <CardContent className="space-y-6">
               <div className="space-y-3">
                 <Label htmlFor="model-select" className="text-base font-medium">Language Model</Label>
-                <Select defaultValue="gpt4">
+                <Select
+                  value={settings.languageModel}
+                  onValueChange={(val) => updateSetting('languageModel', val)}
+                >
                   <SelectTrigger id="model-select" data-testid="model-select">
                     <SelectValue />
                   </SelectTrigger>
@@ -79,7 +126,10 @@ const Settings = ({ darkMode, toggleDarkMode }) => {
 
               <div className="space-y-3">
                 <Label htmlFor="embedding-model" className="text-base font-medium">Embedding Model</Label>
-                <Select defaultValue="openai">
+                <Select
+                  value={settings.embeddingModel}
+                  onValueChange={(val) => updateSetting('embeddingModel', val)}
+                >
                   <SelectTrigger id="embedding-model" data-testid="embedding-model-select">
                     <SelectValue />
                   </SelectTrigger>
@@ -107,7 +157,12 @@ const Settings = ({ darkMode, toggleDarkMode }) => {
                   <Label htmlFor="use-reranker" className="text-base font-medium">Use Re-Ranker</Label>
                   <p className="text-sm text-slate-600 dark:text-slate-400">Improve result relevance with re-ranking</p>
                 </div>
-                <Switch id="use-reranker" defaultChecked data-testid="use-reranker-toggle" />
+                <Switch
+                  id="use-reranker"
+                  checked={settings.useReranker}
+                  onCheckedChange={(checked) => updateSetting('useReranker', checked)}
+                  data-testid="use-reranker-toggle"
+                />
               </div>
 
               <Separator />
@@ -117,7 +172,12 @@ const Settings = ({ darkMode, toggleDarkMode }) => {
                   <Label htmlFor="show-reasoning" className="text-base font-medium">Show Reasoning Steps</Label>
                   <p className="text-sm text-slate-600 dark:text-slate-400">Display AI reasoning process</p>
                 </div>
-                <Switch id="show-reasoning" data-testid="show-reasoning-toggle" />
+                <Switch
+                  id="show-reasoning"
+                  checked={settings.showReasoning}
+                  onCheckedChange={(checked) => updateSetting('showReasoning', checked)}
+                  data-testid="show-reasoning-toggle"
+                />
               </div>
 
               <Separator />
@@ -127,7 +187,12 @@ const Settings = ({ darkMode, toggleDarkMode }) => {
                   <Label htmlFor="strict-context" className="text-base font-medium">Strict Context Mode</Label>
                   <p className="text-sm text-slate-600 dark:text-slate-400">Only use information from documents</p>
                 </div>
-                <Switch id="strict-context" defaultChecked data-testid="strict-context-toggle" />
+                <Switch
+                  id="strict-context"
+                  checked={settings.strictContext}
+                  onCheckedChange={(checked) => updateSetting('strictContext', checked)}
+                  data-testid="strict-context-toggle"
+                />
               </div>
             </CardContent>
           </Card>
@@ -143,7 +208,10 @@ const Settings = ({ darkMode, toggleDarkMode }) => {
             <CardContent className="space-y-6">
               <div className="space-y-3">
                 <Label htmlFor="chunk-size" className="text-base font-medium">Chunk Size</Label>
-                <Select defaultValue="medium">
+                <Select
+                  value={settings.chunkSize}
+                  onValueChange={(val) => updateSetting('chunkSize', val)}
+                >
                   <SelectTrigger id="chunk-size" data-testid="chunk-size-select">
                     <SelectValue />
                   </SelectTrigger>
@@ -159,7 +227,10 @@ const Settings = ({ darkMode, toggleDarkMode }) => {
 
               <div className="space-y-3">
                 <Label htmlFor="top-k" className="text-base font-medium">Top-K Results</Label>
-                <Select defaultValue="5">
+                <Select
+                  value={settings.topK}
+                  onValueChange={(val) => updateSetting('topK', val)}
+                >
                   <SelectTrigger id="top-k" data-testid="top-k-select">
                     <SelectValue />
                   </SelectTrigger>
@@ -173,13 +244,23 @@ const Settings = ({ darkMode, toggleDarkMode }) => {
             </CardContent>
           </Card>
 
-          {/* Save Button */}
+          {/* Action Buttons */}
           <div className="flex justify-end gap-4">
-            <Button variant="outline" data-testid="reset-settings-button">Reset to Defaults</Button>
             <Button
-              className="bg-gradient-to-r from-slate-900 to-slate-800 hover:from-slate-800 hover:to-slate-700 text-white"
+              variant="outline"
+              data-testid="reset-settings-button"
+              onClick={handleReset}
+              className="border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800"
+            >
+              <RotateCcw className="w-4 h-4 mr-2" />
+              Reset to Defaults
+            </Button>
+            <Button
+              onClick={handleSave}
+              className="bg-gradient-to-r from-slate-900 to-slate-800 hover:from-slate-800 hover:to-slate-700 text-white dark:from-slate-100 dark:to-slate-200 dark:text-slate-900 dark:hover:from-slate-200 dark:hover:to-slate-300 shadow-sm"
               data-testid="save-settings-button"
             >
+              <Save className="w-4 h-4 mr-2" />
               Save Changes
             </Button>
           </div>
@@ -190,4 +271,3 @@ const Settings = ({ darkMode, toggleDarkMode }) => {
 };
 
 export default Settings;
-  

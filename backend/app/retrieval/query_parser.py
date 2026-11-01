@@ -76,10 +76,14 @@ DOC_TYPE_MAP: Dict[str, str] = {
     "school card": "student_id_card", "college card": "student_id_card",
     "id card": "student_id_card", "identity card": "student_id_card",
     "student card": "student_id_card",
-    # Research Paper / Academic Report
+    # Research Paper
     "research paper": "research_paper", "paper": "research_paper",
     "research": "research_paper", "academic paper": "research_paper",
-    "report": "report", "project report": "report",
+    "conference paper": "research_paper", "journal paper": "research_paper",
+    # Report / Project Report
+    "report": "report", "project report": "report", "ipd report": "report",
+    "course report": "report", "technical report": "report", "thesis": "report",
+    "project documentation": "report", "final report": "report", "engineering report": "report",
 }
 
 MONTH_MAP: Dict[str, str] = {
@@ -102,10 +106,21 @@ _AMOUNT_RE = re.compile(r"([₹$€£]?\s*\d[\d,]*(?:\.\d{1,2})?)", re.IGNORECAS
 _ABOVE_RE  = re.compile(r"\b(above|over|more than|greater than)\b", re.IGNORECASE)
 _BELOW_RE  = re.compile(r"\b(below|under|less than)\b", re.IGNORECASE)
 
-SYSTEM_PROMPT = """Parse user query into JSON. Return ONLY JSON:
-{"document_type": "<slug or null>", "year": <int or null>, "month": "<month or null>", "entities": ["<names>"], "amount_filters": null, "semantic_query": "<search text>"}
-Slugs: electricity_bill, water_bill, gas_bill, mobile_bill, bank_statement, invoice, receipt, marksheet, certificate, aadhaar, pan_card, passport, insurance, medical_report, prescription, legal_document, tax_document, resume, student_id_card.
-Map aadhar/adhar->aadhaar, pan->pan_card, cv->resume, college/student id->student_id_card."""
+import datetime
+
+def get_system_prompt() -> str:
+    now = datetime.datetime.now()
+    cur_year = now.year
+    cur_month = now.strftime("%B")
+    return f"""Parse user query into JSON. Return ONLY JSON:
+{{"document_type": "<slug or null>", "year": <int or null>, "month": "<month or null>", "entities": ["<names>"], "amount_filters": null, "semantic_query": "<search text>"}}
+Current Temporal Context: Today is {cur_month} {cur_year}.
+If user mentions 'last year', year is {cur_year - 1}. If user mentions 'this year', year is {cur_year}.
+Slugs: electricity_bill, water_bill, gas_bill, mobile_bill, bank_statement, invoice, receipt, marksheet, certificate, aadhaar, pan_card, passport, insurance, medical_report, prescription, legal_document, tax_document, resume, student_id_card, research_paper, report.
+Map aadhar/adhar->aadhaar, pan->pan_card, cv->resume, college/student id->student_id_card, ipd report/project report/course report->report, research paper/academic paper->research_paper.
+Rules:
+- entities: ONLY include person names, companies, or organizations that explicitly appear in the user query. Do NOT invent names. Do NOT put common words like 'my', 'paper', 'all', 'document' in entities.
+- semantic_query: Keep all search terms and person names (never reduce to just 'all documents')."""
 
 
 class QueryParser:
@@ -117,23 +132,23 @@ class QueryParser:
             api_key=settings.OPENROUTER_API_KEY,
         )
 
-    async def parse(self, query: str) -> ParsedQuery:
+    async def parse(self, query: str, user_name: Optional[str] = None) -> ParsedQuery:
         import asyncio
         loop = asyncio.get_event_loop()
         try:
             raw = await loop.run_in_executor(None, self._call_llm, query)
-            parsed = self._validate(raw, query)
+            parsed = self._validate(raw, query, user_name)
             logger.info("[PARSER] LLM parsed query: %s", parsed.model_dump())
             return parsed
         except Exception as exc:
             logger.warning("[PARSER] LLM failed (%s) — using regex fallback", exc)
-            return self._regex_fallback(query)
+            return self._regex_fallback(query, user_name)
 
     def _call_llm(self, query: str) -> str:
         response = self._client.chat.completions.create(
             model="qwen/qwen-2.5-7b-instruct",
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": get_system_prompt()},
                 {"role": "user", "content": query},
             ],
             response_format={"type": "json_object"},
@@ -142,7 +157,7 @@ class QueryParser:
         )
         return response.choices[0].message.content
 
-    def _validate(self, raw: str, query: str) -> ParsedQuery:
+    def _validate(self, raw: str, query: str, user_name: Optional[str] = None) -> ParsedQuery:
         raw = raw.strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -178,6 +193,28 @@ class QueryParser:
             except (TypeError, ValueError):
                 year = None
 
+        # Year validation: ONLY accept a year filter if the query actually mentioned a 4-digit year or relative year phrase
+        year_mentioned = bool(
+            re.search(r"\b(19\d{2}|20\d{2})\b", query)
+            or re.search(r"\b(last\s+year|previous\s+year|past\s+year|prior\s+year|this\s+year|current\s+year|\d+\s+years?\s+ago)\b", query, re.IGNORECASE)
+        )
+        if not year_mentioned:
+            year = None
+        else:
+            now = datetime.datetime.now()
+            cur_year = now.year
+            if re.search(r"\b(last\s+year|previous\s+year|past\s+year|prior\s+year)\b", query, re.IGNORECASE):
+                year = cur_year - 1
+            elif re.search(r"\b(this\s+year|current\s+year)\b", query, re.IGNORECASE):
+                year = cur_year
+            elif year is None:
+                m_ago = re.search(r"\b(\d+)\s+years?\s+ago\b", query, re.IGNORECASE)
+                if m_ago:
+                    year = cur_year - int(m_ago.group(1))
+
+        # Check if user requested latest/updated version
+        is_latest = bool(re.search(r"\b(latest|updated|newest|recent|most recent|last uploaded)\b", query, re.IGNORECASE))
+
         amount_filter = None
         af = data.get("amount_filters")
         if af and isinstance(af, dict):
@@ -194,23 +231,61 @@ class QueryParser:
         if len(sem_q.split()) <= 1 and len(query.split()) > 1:
             sem_q = query.strip()
 
+        # Clean and validate entities: drop common stop words and hallucinations
+        STOP_ENTITIES = {
+            "my", "me", "mine", "myself", "i", "all", "document", "documents",
+            "file", "files", "paper", "papers", "card", "bill", "statement",
+            "the", "a", "an", "latest", "updated", "recent", "newest",
+            "their", "they", "them", "he", "she", "it", "its", "his", "her",
+            "our", "your", "who", "whom", "whose", "which", "what", "how",
+            "model", "models", "author", "authors", "this", "that", "these", "those",
+            "research", "paper", "study", "report"
+        }
+        q_lower = query.lower()
+        extracted_entities = []
+        for e in (data.get("entities") or []):
+            clean_e = str(e).strip().lower()
+            if not clean_e or clean_e in STOP_ENTITIES:
+                continue
+            # Keep only if actually mentioned in the user query
+            if clean_e in q_lower:
+                extracted_entities.append(clean_e)
+
+        # Resolve first-person possessives ("my resume", "my all documents") to authenticated user
+        if user_name and re.search(r"\b(my|mine)\b", query, re.IGNORECASE):
+            clean_user = user_name.lower().strip()
+            if clean_user and clean_user not in extracted_entities:
+                extracted_entities.append(clean_user)
+
+        for ent in extracted_entities:
+            if ent.lower() not in sem_q.lower():
+                sem_q = f"{ent} {sem_q}".strip()
+
         return ParsedQuery(
             document_type=doc_type,
             year=year,
             month=month,
-            entities=[str(e) for e in (data.get("entities") or [])],
+            entities=extracted_entities,
             amount_filters=amount_filter,
+            is_latest=is_latest,
             semantic_query=sem_q,
             raw_query=query,
         )
 
-    def _regex_fallback(self, query: str) -> ParsedQuery:
+    def _regex_fallback(self, query: str, user_name: Optional[str] = None) -> ParsedQuery:
         query_lower = query.lower()
 
+        now = datetime.datetime.now()
+        cur_year = now.year
         year = None
-        m = _YEAR_RE.search(query)
-        if m:
-            year = int(m.group(1))
+        if re.search(r"\b(last\s+year|previous\s+year|past\s+year|prior\s+year)\b", query, re.IGNORECASE):
+            year = cur_year - 1
+        elif re.search(r"\b(this\s+year|current\s+year)\b", query, re.IGNORECASE):
+            year = cur_year
+        else:
+            m = _YEAR_RE.search(query)
+            if m:
+                year = int(m.group(1))
 
         month = None
         m = _MONTH_RE.search(query_lower)
@@ -237,15 +312,29 @@ class QueryParser:
 
         # Extract entities from possessives (e.g. "Shubham's resume" -> "shubham")
         entities = [m.lower() for m in re.findall(r"\b([A-Za-z]+)'s\b", query)]
+        if user_name and re.search(r"\b(my|mine)\b", query, re.IGNORECASE):
+            clean_user = user_name.lower().strip()
+            if clean_user and clean_user not in [e.lower() for e in entities]:
+                entities.append(clean_user)
+
+        is_latest = bool(re.search(r"\b(latest|updated|newest|recent|most recent|last uploaded)\b", query, re.IGNORECASE))
 
         semantic = query
         if year:
             semantic = re.sub(str(year), "", semantic)
         semantic = re.sub(r"\s+", " ", semantic).strip()
 
+        for ent in entities:
+            if ent.lower() not in semantic.lower():
+                semantic = f"{ent} {semantic}".strip()
+
         return ParsedQuery(
-            document_type=doc_type, year=year, month=month, entities=entities,
+            document_type=doc_type,
+            year=year,
+            month=month,
+            entities=entities,
             amount_filters=amount_filter,
+            is_latest=is_latest,
             semantic_query=semantic or query,
             raw_query=query,
         )
