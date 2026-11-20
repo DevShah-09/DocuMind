@@ -115,9 +115,37 @@ flowchart TD
 ### 2.2 Document Ingestion Pipeline
 
 ```mermaid
+flowchart TD
+    Upload["User uploads PDF or Image"] --> Auth["Verify JWT & compute SHA-256"]
+    Auth --> DupCheck{"Duplicate for user?"}
+    DupCheck -->|Yes| ErrDup["❌ 400 'File already exists'"]
+    DupCheck -->|No| Format{"Document Format?"}
+
+    Format -->|Digital PDF >50 words| FastPath["⚡ Fast Path: PyMuPDF Text Stream\nqwen-2.5-7b-instruct (<1s)"]
+    Format -->|Scanned PDF or Image| VisionPath["👁️ Vision Path: Rasterize 1.25x DPI\nqwen2.5-vl-72b-instruct (~3s)"]
+
+    FastPath --> MetaJSON["Structured Metadata JSON\ncategory, confidence, summary, text"]
+    VisionPath --> QualityCheck{"Image Legible?"}
+    QualityCheck -->|Blurry / Glare| ErrBlur["❌ 400 'Image Quality Issue'"]
+    QualityCheck -->|Legible| MetaJSON
+
+    MetaJSON --> Crypto["🔐 ChaCha20-Poly1305 Encrypt\n(HKDF per-user key)"]
+    Crypto --> S3Store["☁️ Store encrypted bytes in AWS S3"]
+
+    MetaJSON --> Chunking["RecursiveTextChunker\n2,400 chars, 200 overlap"]
+    Chunking --> BGEEmbed["BAAI/bge-base-en-v1.5\n768-dim Dense Vectors"]
+    BGEEmbed --> QdrantStore["Qdrant Cloud Upsert\n(document_chunks + user_documents)"]
+
+    S3Store --> Success["✅ 200 OK Response\n(doc_id, category, confidence, summary)"]
+    QdrantStore --> Success
+```
+
+#### Ingestion Sequence Flow
+
+```mermaid
 sequenceDiagram
     autonumber
-    actor User as 👤 User
+    actor User as 👤 User Browser
     participant API as FastAPI Backend
     participant Fitz as PyMuPDF
     participant LLM as OpenRouter (Qwen)
@@ -125,39 +153,34 @@ sequenceDiagram
     participant Qdrant as Qdrant Cloud
     participant S3 as AWS S3
 
-    User->>API: POST /upload (PDF/Image, JWT)
-    API->>API: Verify JWT, derive user_id, SHA-256 hash
+    User->>API: POST /upload (file bytes, content_type, JWT)
+    API->>API: Verify JWT, derive user_id, compute SHA-256
     API->>Qdrant: Check duplicate (hash + user_id scope)
 
-    alt File already exists for this user
-        Qdrant-->>API: Duplicate detected
-        API-->>User: 400 "File already exists in your collections"
-    end
+    Note over API,User: ⚠️ If duplicate: returns 400 "File already exists"
 
-    alt Digital PDF (>50 words extractable)
-        API->>Fitz: Extract text stream
-        Fitz-->>API: Raw text
-        API->>LLM: qwen-2.5-7b-instruct (classify + metadata JSON)
-    else Scanned PDF or Image
-        API->>Fitz: Rasterize pages at 1.25× DPI
-        Fitz-->>API: JPEG Base64 frames
-        API->>LLM: qwen2.5-vl-72b-instruct (OCR + classify + metadata)
-    end
+    Note over API,LLM: Branch A (Digital PDF >50 words): Fast Path
+    API->>Fitz: Extract digital text stream
+    Fitz-->>API: Raw digital text
+    API->>LLM: Fast Path: qwen-2.5-7b-instruct (classify + metadata JSON)
+
+    Note over API,LLM: Branch B (Scanned PDF / Image): Vision Path
+    API->>Fitz: Rasterize pages at 1.25x DPI
+    Fitz-->>API: JPEG Base64 frames
+    API->>LLM: Vision Path: qwen2.5-vl-72b-instruct (OCR + classify + blur check)
 
     LLM-->>API: JSON {category, confidence, metadata, summary, text}
 
-    alt Image too blurry
-        API-->>User: 400 "Image Quality Issue: [blur_reason]"
-    end
+    Note over API,User: ⚠️ If blurry: returns 400 "Image Quality Issue"
 
-    API->>API: Encrypt bytes with ChaCha20-Poly1305 + HKDF key
+    API->>API: Encrypt bytes with ChaCha20-Poly1305 (User-derived key)
     API->>S3: Upload encrypted ciphertext
     API->>API: RecursiveTextChunker (2400 chars, 200 overlap)
-    API->>BGE: Batch embed chunks (768-dim)
-    BGE-->>API: Dense vectors
-    API->>Qdrant: Upsert vectors + payloads → document_chunks
-    API->>Qdrant: Upsert doc metadata → user_documents
-    API-->>User: 200 {doc_id, category, confidence, summary}
+    API->>BGE: Batch embed chunks (768 dimensions)
+    BGE-->>API: Dense vector embeddings list
+    API->>Qdrant: Upsert vectors + payloads into document_chunks
+    API->>Qdrant: Upsert document metadata into user_documents
+    API-->>User: 200 Success (doc_id, category, confidence, summary)
 ```
 
 ### 2.3 Query & RAG Pipeline
@@ -691,7 +714,7 @@ Supabase: 200 GoTrue
 |:---|:---|:---|
 | **Dev Shah** | [@DevShah-09](https://github.com/DevShah-09) | Full-Stack Lead, Backend Architecture |
 | **Shubham Shah** | [@ShubhamShah](https://github.com/ShubhamShah) | AI/ML Pipeline, Research Implementation |
-| **Rishi Shah** | — | Storage, Security, Document Viewing |
+| **Rishi Shah** | [@codeit55](https://github.com/codeit55) | Storage, Security, Document Viewing |
 
 ---
 
@@ -732,7 +755,7 @@ Supabase: 200 GoTrue
 
 ---
 
-### Rishi Shah — Storage, Security & Document Viewing
+### Rishi Shah ([@codeit55](https://github.com/codeit55)) — Storage, Security & Document Viewing
 
 > **4 commits** — File security, viewing, and storage architecture
 
