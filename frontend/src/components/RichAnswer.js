@@ -123,7 +123,7 @@ function renderInlineText(text) {
 /**
  * RichAnswer Component
  * Parses and displays AI explanations, research summaries, and structured outputs
- * with headings, clean lists, styled math, and highlight cards.
+ * with hierarchical section indentation (Option B: tab space with subtle vertical guide lines).
  */
 export default function RichAnswer({ content }) {
   if (!content) return null;
@@ -146,12 +146,12 @@ export default function RichAnswer({ content }) {
     }
   }
 
-  const blocks = [];
+  const flatBlocks = [];
   let currentList = null;
 
   const flushList = () => {
     if (currentList) {
-      blocks.push(currentList);
+      flatBlocks.push(currentList);
       currentList = null;
     }
   };
@@ -168,22 +168,21 @@ export default function RichAnswer({ content }) {
       const isConclusion = /conclusion|summary|key takeaway|limitations/i.test(text);
 
       if (level <= 2) {
-        blocks.push({ type: 'h2', content: text });
+        flatBlocks.push({ type: 'h2', content: text });
       } else if (level === 3) {
-        blocks.push({ type: isConclusion ? 'h3_conclusion' : 'h3', content: text });
+        flatBlocks.push({ type: isConclusion ? 'h3_conclusion' : 'h3', content: text });
       } else {
         // level 4, 5, 6
-        blocks.push({ type: 'h4', content: text });
+        flatBlocks.push({ type: 'h4', content: text });
       }
       continue;
     }
 
     // ── Major Section Headers (e.g. "1. Objective", "2. Key Concepts and Methodology") ───
-    // If a numbered line is short (< 60 chars) and has no colon or period in the title, it's a section header
     const majorHeaderMatch = line.match(/^(\d+)\.\s+([A-Z][a-zA-Z0-9\s,&/\-()]{2,60})$/);
     if (majorHeaderMatch && !line.includes(':') && !line.includes('.')) {
       flushList();
-      blocks.push({
+      flatBlocks.push({
         type: 'major_section',
         num: majorHeaderMatch[1],
         content: majorHeaderMatch[2].trim(),
@@ -219,7 +218,7 @@ export default function RichAnswer({ content }) {
     // ── Blockquote (e.g. "> note") ───────────────────────────────────────────
     if (line.startsWith('>')) {
       flushList();
-      blocks.push({
+      flatBlocks.push({
         type: 'blockquote',
         content: line.replace(/^>\s*/, ''),
       });
@@ -228,9 +227,8 @@ export default function RichAnswer({ content }) {
 
     // ── Normal Paragraph / Intro ─────────────────────────────────────────────
     flushList();
-    // Check if it's an introductory preamble
     const isIntro = i === 0 && /^(to explain|based on the|here is|let's break down)/i.test(line);
-    blocks.push({
+    flatBlocks.push({
       type: isIntro ? 'intro' : 'p',
       content: line,
     });
@@ -238,124 +236,187 @@ export default function RichAnswer({ content }) {
 
   flushList();
 
-  return (
-    <div className="space-y-3.5 text-sm leading-relaxed text-slate-700 dark:text-slate-200">
-      {blocks.map((block, idx) => {
-        switch (block.type) {
-          case 'intro':
-            return (
-              <div
-                key={idx}
-                className="p-3 rounded-xl bg-cyan-50/60 dark:bg-cyan-950/20 border border-cyan-200/50 dark:border-cyan-800/40 text-xs text-slate-600 dark:text-slate-300 font-medium flex items-center gap-2"
-              >
-                <Sparkles className="w-4 h-4 text-cyan-500 flex-shrink-0" />
-                <span>{renderInlineText(block.content)}</span>
-              </div>
-            );
+  // ── Build hierarchical tree for Option B (tab indentation under headings) ───
+  const root = { type: 'root', children: [] };
+  const stack = [{ node: root, level: 0 }];
 
-          case 'major_section':
-            return (
-              <div key={idx} className="pt-4 pb-1">
-                <div className="flex items-center gap-2.5 p-2 rounded-xl bg-slate-100/70 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60">
-                  <span className="w-6 h-6 rounded-lg bg-cyan-500 text-white font-bold text-xs flex items-center justify-center shadow-sm">
-                    {block.num}
-                  </span>
-                  <h2 className="text-sm font-bold text-slate-900 dark:text-white tracking-tight">
-                    {renderInlineText(block.content)}
-                  </h2>
+  const getHeadingLevel = (block) => {
+    if (block.type === 'major_section' || block.type === 'h2') return 2;
+    if (block.type === 'h3' || block.type === 'h3_conclusion') return 3;
+    if (block.type === 'h4') return 4;
+    return 0;
+  };
+
+  for (const block of flatBlocks) {
+    const level = getHeadingLevel(block);
+    if (level === 0) {
+      // Leaf body block
+      stack[stack.length - 1].node.children.push({ type: 'leaf', block });
+    } else {
+      // Heading section: pop any section of same or deeper level
+      while (stack.length > 1 && stack[stack.length - 1].level >= level) {
+        stack.pop();
+      }
+      const sectionNode = {
+        type: 'section',
+        header: block,
+        level,
+        children: [],
+      };
+      stack[stack.length - 1].node.children.push(sectionNode);
+      stack.push({ node: sectionNode, level });
+    }
+  }
+
+  // ── Render leaf items ──────────────────────────────────────────────────────
+  const renderLeafBlock = (block, idx) => {
+    switch (block.type) {
+      case 'intro':
+        return (
+          <div
+            key={idx}
+            className="p-3 rounded-xl bg-cyan-50/60 dark:bg-cyan-950/20 border border-cyan-200/50 dark:border-cyan-800/40 text-xs text-slate-600 dark:text-slate-300 font-medium flex items-center gap-2"
+          >
+            <Sparkles className="w-4 h-4 text-cyan-500 flex-shrink-0" />
+            <span>{renderInlineText(block.content)}</span>
+          </div>
+        );
+
+      case 'numbered':
+        return (
+          <div key={idx} className="space-y-2 pl-0.5 my-1.5">
+            {block.items.map((item, itemIdx) => (
+              <div
+                key={itemIdx}
+                className="flex items-start gap-2.5 p-2 rounded-lg bg-slate-50/70 dark:bg-slate-800/40 border border-slate-200/50 dark:border-slate-800/50"
+              >
+                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-cyan-100 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-300 text-xs font-bold flex items-center justify-center mt-0.5">
+                  {item.num}
+                </span>
+                <div className="flex-1 text-slate-700 dark:text-slate-200 text-sm">
+                  {renderInlineText(item.content)}
                 </div>
               </div>
-            );
+            ))}
+          </div>
+        );
 
-          case 'h2':
-            return (
-              <div key={idx} className="pt-3 pb-1 border-b border-slate-200/60 dark:border-slate-800/60">
-                <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                  <Sparkles className="w-4 h-4 text-cyan-500 flex-shrink-0" />
-                  <span>{renderInlineText(block.content)}</span>
-                </h2>
-              </div>
-            );
+      case 'bullet':
+        return (
+          <ul key={idx} className="space-y-2 pl-0.5 my-1.5">
+            {block.items.map((item, itemIdx) => (
+              <li key={itemIdx} className="flex items-start gap-2 text-slate-700 dark:text-slate-300 text-sm">
+                <span className="text-cyan-500 font-bold mt-1 text-xs">•</span>
+                <div className="flex-1 leading-relaxed">
+                  {renderInlineText(item)}
+                </div>
+              </li>
+            ))}
+          </ul>
+        );
 
-          case 'h3':
-            return (
-              <div key={idx} className="pt-2">
-                <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2 pl-2.5 border-l-2 border-cyan-500">
-                  <span>{renderInlineText(block.content)}</span>
-                </h3>
-              </div>
-            );
+      case 'blockquote':
+        return (
+          <blockquote
+            key={idx}
+            className="pl-3.5 py-1.5 border-l-2 border-violet-400 dark:border-violet-600 italic bg-violet-50/40 dark:bg-violet-950/20 text-slate-600 dark:text-slate-300 text-xs rounded-r-lg my-1.5"
+          >
+            {renderInlineText(block.content)}
+          </blockquote>
+        );
 
-          case 'h3_conclusion':
-            return (
-              <div key={idx} className="pt-3">
-                <h3 className="text-sm font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-2 pl-2.5 border-l-2 border-emerald-500">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
-                  <span>{renderInlineText(block.content)}</span>
-                </h3>
-              </div>
-            );
+      case 'p':
+      default:
+        return (
+          <p key={idx} className="leading-relaxed text-slate-700 dark:text-slate-200">
+            {renderInlineText(block.content)}
+          </p>
+        );
+    }
+  };
 
-          case 'h4':
-            return (
-              <div key={idx} className="pt-2 flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-cyan-700 dark:text-cyan-400">
-                <ChevronRight className="w-3.5 h-3.5 text-cyan-500 flex-shrink-0" />
-                <span>{renderInlineText(block.content)}</span>
-              </div>
-            );
+  // ── Render tree node (sections & leaves) ────────────────────────────────────
+  const renderTreeNode = (node, idx) => {
+    if (node.type === 'leaf') {
+      return renderLeafBlock(node.block, idx);
+    }
 
-          case 'numbered':
-            return (
-              <div key={idx} className="space-y-2 pl-1 my-2">
-                {block.items.map((item, itemIdx) => (
-                  <div
-                    key={itemIdx}
-                    className="flex items-start gap-2.5 p-2 rounded-lg bg-slate-50/70 dark:bg-slate-800/40 border border-slate-200/50 dark:border-slate-800/50"
-                  >
-                    <span className="flex-shrink-0 w-5 h-5 rounded-full bg-cyan-100 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-300 text-xs font-bold flex items-center justify-center mt-0.5">
-                      {item.num}
-                    </span>
-                    <div className="flex-1 text-slate-700 dark:text-slate-200 text-sm">
-                      {renderInlineText(item.content)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            );
+    if (node.type === 'section') {
+      const { header, level, children } = node;
 
-          case 'bullet':
-            return (
-              <ul key={idx} className="space-y-2 pl-2 my-2">
-                {block.items.map((item, itemIdx) => (
-                  <li key={itemIdx} className="flex items-start gap-2 text-slate-700 dark:text-slate-300 text-sm">
-                    <span className="text-cyan-500 font-bold mt-1 text-xs">•</span>
-                    <div className="flex-1 leading-relaxed">
-                      {renderInlineText(item)}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            );
+      let headerEl = null;
+      if (header.type === 'major_section') {
+        headerEl = (
+          <div className="pt-3 pb-1">
+            <div className="flex items-center gap-2.5 p-2 rounded-xl bg-slate-100/70 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60">
+              <span className="w-6 h-6 rounded-lg bg-cyan-500 text-white font-bold text-xs flex items-center justify-center shadow-sm">
+                {header.num}
+              </span>
+              <h2 className="text-sm font-bold text-slate-900 dark:text-white tracking-tight">
+                {renderInlineText(header.content)}
+              </h2>
+            </div>
+          </div>
+        );
+      } else if (header.type === 'h2') {
+        headerEl = (
+          <div className="pt-3 pb-1 border-b border-slate-200/60 dark:border-slate-800/60">
+            <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-cyan-500 flex-shrink-0" />
+              <span>{renderInlineText(header.content)}</span>
+            </h2>
+          </div>
+        );
+      } else if (header.type === 'h3') {
+        headerEl = (
+          <div className="pt-2">
+            <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2 pl-2.5 border-l-2 border-cyan-500">
+              <span>{renderInlineText(header.content)}</span>
+            </h3>
+          </div>
+        );
+      } else if (header.type === 'h3_conclusion') {
+        headerEl = (
+          <div className="pt-3">
+            <h3 className="text-sm font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-2 pl-2.5 border-l-2 border-emerald-500">
+              <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+              <span>{renderInlineText(header.content)}</span>
+            </h3>
+          </div>
+        );
+      } else if (header.type === 'h4') {
+        headerEl = (
+          <div className="pt-2 flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-cyan-700 dark:text-cyan-400">
+            <ChevronRight className="w-3.5 h-3.5 text-cyan-500 flex-shrink-0" />
+            <span>{renderInlineText(header.content)}</span>
+          </div>
+        );
+      }
 
-          case 'blockquote':
-            return (
-              <blockquote
-                key={idx}
-                className="pl-3.5 py-1.5 border-l-2 border-violet-400 dark:border-violet-600 italic bg-violet-50/40 dark:bg-violet-950/20 text-slate-600 dark:text-slate-300 text-xs rounded-r-lg my-2"
-              >
-                {renderInlineText(block.content)}
-              </blockquote>
-            );
+      // Tab indentation under headings without vertical lines
+      const indentClasses =
+        level === 4
+          ? 'pl-4 ml-1 space-y-2.5 my-2'
+          : 'pl-5 ml-1 space-y-2.5 my-2.5';
 
-          case 'p':
-          default:
-            return (
-              <p key={idx} className="leading-relaxed text-slate-700 dark:text-slate-200">
-                {renderInlineText(block.content)}
-              </p>
-            );
-        }
-      })}
+      return (
+        <div key={idx} className="space-y-1">
+          {headerEl}
+          {children && children.length > 0 && (
+            <div className={indentClasses}>
+              {children.map((childNode, cIdx) => renderTreeNode(childNode, cIdx))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    return null;
+  };
+
+  return (
+    <div className="space-y-3.5 text-sm leading-relaxed text-slate-700 dark:text-slate-200">
+      {root.children.map((childNode, idx) => renderTreeNode(childNode, idx))}
     </div>
   );
 }

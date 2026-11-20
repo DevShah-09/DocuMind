@@ -197,6 +197,7 @@ function App() {
             <Routes>
               {/* ── Public routes ─────────────────────────────── */}
               <Route path="/login" element={<Login />} />
+              <Route path="/404" element={<NotFound />} />
 
               {/* ── Protected routes ──────────────────────────── */}
               <Route
